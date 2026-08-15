@@ -1,0 +1,371 @@
+diff --git a/python/hololink/__init__.py b/python/hololink/__init__.py
+index 0a219e3..cf66e14 100755
+--- a/python/hololink/__init__.py
++++ b/python/hololink/__init__.py
+@@ -93,6 +93,7 @@ from ._hololink import (
+     Enumerator,
+     Hololink,
+     HsbLogLevel,
++    HTK_JESD_HPS_Config,
+     ImGuiRenderer,
+     Metadata,
+     NvtxTrace,
+@@ -178,6 +179,7 @@ __all__ = [
+     "HSB_LOG_LEVEL_INVALID",
+     "HsbLogLevel",
+     "Hololink",
++    "HTK_JESD_HPS_Config",
+     "I2C_10B_ADDRESS",
+     "I2C_CTRL",
+     "I2C_BUSY",
+diff --git a/python/hololink/hololink.cpp b/python/hololink/hololink.cpp
+index 0c0df54..faaadcd 100644
+--- a/python/hololink/hololink.cpp
++++ b/python/hololink/hololink.cpp
+@@ -21,6 +21,7 @@
+ #include <hololink/core/data_channel.hpp>
+ #include <hololink/core/enumerator.hpp>
+ #include <hololink/core/jesd.hpp>
++#include <hololink/core/htk_jesd.hpp>
+ #include <hololink/core/logging_internal.hpp>
+ #include <hololink/core/named_lock.hpp>
+ #include <hololink/core/nvtx_trace.hpp>
+@@ -727,6 +728,12 @@ PYBIND11_MODULE(_hololink, m)
+         .def("apply", &AD9986Config::apply)
+         .def("verify_link_status", &AD9986Config::verify_link_status);
+ 
++    py::class_<HTK_JESD_HPS_Config, std::shared_ptr<HTK_JESD_HPS_Config>>(m, "HTK_JESD_HPS_Config")
++        .def(py::init<Hololink&>(), "hololink"_a)
++        .def("host_pause_mapping", &HTK_JESD_HPS_Config::host_pause_mapping, "mask"_a)
++        .def("apply", &HTK_JESD_HPS_Config::apply)
++        .def("verify_link_status", &HTK_JESD_HPS_Config::verify_link_status);
++
+     py::class_<core::NvtxTrace, std::shared_ptr<core::NvtxTrace>>(m, "NvtxTrace")
+         .def_static("setThreadName", &core::NvtxTrace::setThreadName, "threadName"_a)
+         .def_static("event_u64", &core::NvtxTrace::event_u64, "message"_a, "datum"_a);
+diff --git a/src/hololink/core/CMakeLists.txt b/src/hololink/core/CMakeLists.txt
+index cee604c..47a3a20 100644
+--- a/src/hololink/core/CMakeLists.txt
++++ b/src/hololink/core/CMakeLists.txt
+@@ -21,6 +21,7 @@ add_library(hololink_core STATIC
+   enumerator.cpp
+   hololink.cpp
+   jesd.cpp
++  htk_jesd.cpp
+   logging.cpp
+   metadata.cpp
+   networking.cpp
+@@ -65,6 +66,7 @@ install(FILES
+         enumerator.hpp
+         hololink.hpp
+         jesd.hpp
++        htk_jesd.hpp
+         logging.hpp
+         # Note that logging_internal.hpp is not included in the public release.
+         # logging_internal.hpp
+diff --git a/src/hololink/core/enumerator.cpp b/src/hololink/core/enumerator.cpp
+index a43bfa1..facc679 100644
+--- a/src/hololink/core/enumerator.cpp
++++ b/src/hololink/core/enumerator.cpp
+@@ -700,6 +700,24 @@ void Enumerator::configure_default_enumeration_strategies()
+         microchip_polarfire_total_sensors, microchip_polarfire_total_dataplanes, microchip_polarfire_sifs_per_sensor);
+     (*strategies)[MICROCHIP_POLARFIRE_UUID] = microchip_polarfire_enumeration_strategy;
+ 
++    Metadata htk_metadata_2ch;
++    htk_metadata_2ch["board_description"] = "Hitek Systems AGSOM5u 2ADC-2DAC";
++    unsigned htk_total_sensors = 4; // 2DAC & 2ADC
++    unsigned htk_total_dataplanes = 1;
++    unsigned htk_sifs_per_sensor = 1;
++    auto htk_agsom5u_2ch_enumeration_strategy = std::make_shared<BasicEnumerationStrategy>(htk_metadata_2ch,
++        htk_total_sensors, htk_total_dataplanes, htk_sifs_per_sensor);
++    (*strategies)[HTK_UUID_AG5_2CH_BUILD] = htk_agsom5u_2ch_enumeration_strategy;
++
++    Metadata htk_metadata_4ch;
++    htk_metadata_4ch["board_description"] = "Hitek Systems AGSOM5u 4ADC-4DAC";
++    htk_total_sensors = 8; // 4DAC & 4ADC
++    htk_total_dataplanes = 1;
++    htk_sifs_per_sensor = 1;
++    auto htk_agsom5u_4ch_enumeration_strategy = std::make_shared<BasicEnumerationStrategy>(htk_metadata_4ch,
++        htk_total_sensors, htk_total_dataplanes, htk_sifs_per_sensor);
++    (*strategies)[HTK_UUID_AG5_4CH_BUILD] = htk_agsom5u_4ch_enumeration_strategy;
++
+     auto leopard_eagle_enumeration_strategy = std::make_shared<LeopardEagleEnumerationStrategy>();
+     (*strategies)[LEOPARD_EAGLE_UUID] = leopard_eagle_enumeration_strategy;
+ 
+diff --git a/src/hololink/core/enumerator.hpp b/src/hololink/core/enumerator.hpp
+index b02f9de..487f0ee 100644
+--- a/src/hololink/core/enumerator.hpp
++++ b/src/hololink/core/enumerator.hpp
+@@ -44,6 +44,8 @@ const std::string HOLOLINK_NANO_UUID = "d0f015e0-93b6-4473-b7d1-7dbd01cbeab5";
+ const std::string HOLOLINK_100G_UUID = "7a377bf7-76cb-4756-a4c5-7dddaed8354b";
+ const std::string MICROCHIP_POLARFIRE_UUID = "ed6a9292-debf-40ac-b603-a24e025309c1";
+ const std::string LEOPARD_EAGLE_UUID = "f1627640-b4dc-48af-a360-c55b09b3d230";
++const std::string HTK_UUID_AG5_2CH_BUILD = "187b51fc-1aae-425b-9af8-eafa41ef08ba";
++const std::string HTK_UUID_AG5_4CH_BUILD = "c6d5cfce-4135-4cf8-aa89-e63b0c5815ce";
+ 
+ /**
+  * Strategy that adjusts enumeration data based on FPGA UUID.
+diff --git a/src/hololink/core/htk_jesd.cpp b/src/hololink/core/htk_jesd.cpp
+new file mode 100644
+index 0000000..c969bbf
+--- /dev/null
++++ b/src/hololink/core/htk_jesd.cpp
+@@ -0,0 +1,182 @@
++/**
++ * SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
++ * SPDX-License-Identifier: Apache-2.0
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ * http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#include "htk_jesd.hpp"
++#include "logging_internal.hpp"
++
++#include <arpa/inet.h>
++#include <netinet/in.h>
++#include <sys/socket.h>
++
++namespace hololink {
++
++static constexpr uint32_t HOLOSCAN_USER_BASE_ADDR = 0x10000000;
++static constexpr uint32_t HTK_JESD_LINK_BASE_ADDR = HOLOSCAN_USER_BASE_ADDR + 0x0000D000;
++
++static constexpr uint32_t HTK_JESD_LINK_COM_STS_OFFSET = (0x44);
++static constexpr uint32_t HTK_JESD_LINK_TX_STS_OFFSET = (0x54);
++static constexpr uint32_t HTK_JESD_LINK_RX_STS_OFFSET = (0x64);
++
++
++HTK_JESD_HPS_Config::HTK_JESD_HPS_Config(Hololink& hololink)
++    : hololink_(hololink)
++    , jesd_configured_(false)
++{
++}
++
++void HTK_JESD_HPS_Config::apply(void)
++{
++    // manual jesd config for demo
++    // config only nvidia IP and not jesd
++    configure();
++    run();
++
++    while (!jesd_configured_.load(std::memory_order_relaxed)) {
++        HSB_LOG_INFO("Waiting for JESD configuration to complete...");
++        std::this_thread::sleep_for(std::chrono::seconds(1));
++    }
++    HSB_LOG_INFO("JESD configuration complete");
++}
++
++void HTK_JESD_HPS_Config::host_pause_mapping(uint32_t mask)
++{
++    host_pause_mapping_mask_ = mask;
++}
++
++void HTK_JESD_HPS_Config::power_on()
++{
++  // performed by hps
++}
++
++void HTK_JESD_HPS_Config::setup_clocks()
++{
++  // performed by hps
++}
++
++void HTK_JESD_HPS_Config::configure()
++{
++    HSB_LOG_INFO("JESD::configure");
++
++    // Packetizer Programming
++    hololink_.write_uint32(0x0100000C, 0x10000001);
++    hololink_.write_uint32(0x01000004, 0x00000000);
++    hololink_.write_uint32(0x01000008, 0xFFFFFFFF);
++    hololink_.write_uint32(0x01000004, 0x00000070);
++    hololink_.write_uint32(0x01000008, 0x00000001);
++
++    //Sensor reset off
++    hololink_.write_uint32(0x00000008, 0x0000000F);
++
++    // Map Pause to ethernet interface
++    hololink_.write_uint32(0x0120000C, host_pause_mapping_mask_);
++
++}
++
++void HTK_JESD_HPS_Config::run()
++{
++    HSB_LOG_INFO("JESD::run");
++
++    hololink_.write_uint32(0x01200000, 0x3); // Enable TX
++
++    jesd_configured_.store(true, std::memory_order_release);
++}
++
++bool HTK_JESD_HPS_Config::task_refclk_sw(uint32_t channel, uint32_t refclk, uint32_t hwseq)
++{
++    // performed by hps
++    return true;
++}
++
++bool HTK_JESD_HPS_Config::task_set_pma_attribute(uint32_t channel, uint32_t code, uint32_t data)
++{
++    // performed by hps
++    return true;
++}
++
++void HTK_JESD_HPS_Config::task_pma_analog_reset(uint32_t channel)
++{
++      // performed by hps
++
++}
++
++void HTK_JESD_HPS_Config::configure_nvda_jesd_tx(void)
++{
++      // performed by hps
++}
++
++void HTK_JESD_HPS_Config::configure_nvda_jesd_rx(void)
++{
++      // performed by hps
++}
++
++bool HTK_JESD_HPS_Config::verify_link_status()
++{
++    uint32_t offset;
++    uint32_t status;
++    bool ok = true;
++
++
++    offset = HTK_JESD_LINK_BASE_ADDR + HTK_JESD_LINK_COM_STS_OFFSET;
++    status = hololink_.read_uint32(offset);
++
++    if (status & 0x1) {
++      HSB_LOG_INFO("JESD204 Core PLL lock Status: {:#x}", status & 0x1);
++    }
++    else {
++      ok &= false;
++      HSB_LOG_ERROR("JESD204 Core PLL lock Status: {:#x}", status & 0x1);
++    }
++
++    if (status & 0x10) {
++      HSB_LOG_INFO("JESD204 Sys PLL lock Status: {:#x}", status & 0x10);
++    }
++    else {
++      ok &= false;
++      HSB_LOG_ERROR("JESD204 Sys PLL lock Status: {:#x}", status & 0x10);
++    }
++
++
++    offset = HTK_JESD_LINK_BASE_ADDR + HTK_JESD_LINK_TX_STS_OFFSET;
++    status = hololink_.read_uint32(offset);
++
++    if (status & 0x1) {
++      HSB_LOG_INFO("JESD204 TX DAC Link Status: {:#x}", status & 0x1);
++    }
++    else {
++      ok &= false;
++      HSB_LOG_ERROR("JESD204 TX DAC Link Status: {:#x}", status & 0x1);
++    }
++
++    offset = HTK_JESD_LINK_BASE_ADDR + HTK_JESD_LINK_RX_STS_OFFSET;
++    status = hololink_.read_uint32(offset);
++
++    if (status & 0x1) {
++      HSB_LOG_INFO("JESD204 RX ADC Link Status: {:#x}", status & 0x1);
++    }
++    else {
++      ok &= false;
++      HSB_LOG_ERROR("JESD204 RX ADC Link Status: {:#x}", status & 0x1);
++    }
++
++    if (ok) {
++        HSB_LOG_INFO("JESD link status: OK");
++    }
++
++    return ok;
++}
++
++} // namespace hololink
+diff --git a/src/hololink/core/htk_jesd.hpp b/src/hololink/core/htk_jesd.hpp
+new file mode 100644
+index 0000000..2e650b6
+--- /dev/null
++++ b/src/hololink/core/htk_jesd.hpp
+@@ -0,0 +1,70 @@
++/**
++ * SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
++ * SPDX-License-Identifier: Apache-2.0
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ * http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#pragma once
++
++#include <atomic>
++#include <cstdint>
++#include <thread>
++
++#include "hololink.hpp"
++#include "jesd.hpp"
++
++namespace hololink {
++
++/**
++ * in hitek sys esom5u, the jesd config will be performed by ARM HPS in Agilex5 SOC FPGA.
++ * therefore removing the SPI config
++ */
++class HTK_JESD_HPS_Config : public JESDConfig {
++public:
++    explicit HTK_JESD_HPS_Config(Hololink& hololink);
++
++    // Set the host pause mapping for the AD9986.
++    // 0x01: Interface 0
++    // 0x02: Interface 1
++    void host_pause_mapping(uint32_t mask);
++
++    // Applies the current configuration.
++    void apply();
++
++    // Returns true if the JESD link is healthy:
++    // - AD9082 link status == 0x60 (JESD204_LINK_STATUS_DATA)
++    // - No FPGA RX lane 64B66B errors
++    // - No UPHY overflow
++    bool verify_link_status();
++
++    // JESDConfig functions.
++    virtual void power_on();
++    virtual void setup_clocks();
++    virtual void configure();
++    virtual void run();
++
++private:
++    Hololink& hololink_;
++    std::atomic<bool> jesd_configured_;
++
++    bool task_refclk_sw(uint32_t channel, uint32_t refclk, uint32_t hwseq);
++    bool task_set_pma_attribute(uint32_t channel, uint32_t code, uint32_t data);
++    void task_pma_analog_reset(uint32_t channel);
++    void configure_nvda_jesd_tx(void);
++    void configure_nvda_jesd_rx(void);
++
++    uint32_t host_pause_mapping_mask_ = 0;
++};
++
++} // namespace hololink

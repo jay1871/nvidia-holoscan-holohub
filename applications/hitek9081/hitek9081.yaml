@@ -1,0 +1,139 @@
+%YAML 1.2
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+---
+
+# =============================================================================
+# HSB FPGA Configuration
+# =============================================================================
+# These parameters program the FPGA via hololink's configure_roce and control
+# packet sizing. The code computes all derived values (max_packet_size,
+# header_size, samples_per_antenna) from these inputs — no need to keep
+# multiple fields in sync manually.
+#
+# payload_size: FPGA payload bytes per packet (between RoCE headers and ICRC).
+#   total_ethernet_frame = 70 (RoCE headers) + payload_size + 4 (ICRC)
+#
+# mtu: Maximum per-packet payload the Holoscan IP will send. Must be >=
+#   payload_size for single-packet delivery. Hardware max is 4096 bytes.
+#
+# custom_header_size: Bytes the FPGA prepends to IQ data within the payload
+#   (e.g., magic + sequence number). Set to 0 if the payload is pure IQ.
+#
+hsb:
+  hololink_ip: "192.168.0.2"   # HSB FPGA data-plane IP (overridable with --hololink CLI arg)
+  payload_size:  3920          # FPGA payload bytes per packet (observed via pcap RETH DMA_len)
+  mtu: 4096                    # Max bytes per RoCE packet payload (Holoscan IP limit: 4096)
+  custom_header_size: 0        # Bytes before IQ data in payload (magic+seq+reserved; 0 if none)
+  data_port: 4096              # UDP destination port the FPGA sends to (must match flow udp_dst)
+
+# =============================================================================
+# Holoscan Scheduler
+# =============================================================================
+scheduler:
+  check_recession_period_ms: 0
+  worker_thread_number: 5
+  stop_on_deadlock: true
+  stop_on_deadlock_timeout: -1
+
+# =============================================================================
+# DAQIRI DPDK Configuration
+# =============================================================================
+# Configures DPDK NIC binding, memory pools, and flow rules.
+#
+# The FPGA sends RoCE v2 framed UDP packets.
+# DAQIRI delivers the FULL Ethernet frame (Eth header NOT stripped).
+#
+# buf_size must be >= 70 + payload_size + 4 + ~128 (DPDK headroom), rounded
+# up to a power of 2. The code will warn at startup if this is too small.
+#
+daqiri:
+  cfg:
+    version: 1
+    stream_type: "raw"
+    master_core: 8 # non isolated core
+    debug: false
+    log_level: "info"
+    loopback: ""
+
+    memory_regions:
+    - name: "HSB_RX_CPU"
+      kind: "host_pinned" # required for dgx spark 
+      affinity: 0
+      num_bufs: 409600
+      buf_size: 8192            # Must be >= 70 + payload_size + 4 + ~128 headroom
+
+    interfaces:
+    - name: "hsb_rx_port"
+      address: "0002:01:00.0"   # NIC PCI BDF address
+      rx:
+        flow_isolation: true
+        queues:
+        - name: "rx_q_0"
+          id: 0
+          cpu_core: 16  # isolated core
+          batch_size: 20480
+          memory_regions:
+            - "HSB_RX_CPU"
+        flows:
+        - name: "hsb_flow"
+          id: 0
+          action:
+            type: queue
+            id: 0
+          match:
+            udp_src: 12288      # FPGA source port (constant: DATA_SOURCE_UDP_PORT in FPGA)
+            udp_dst: 4096       # Must equal hsb.data_port above
+
+# =============================================================================
+# Hitek9081RxOp — DPDK RX Operator (packet reception only)
+# =============================================================================
+# Receives packets, filters metadata, accumulates IQ samples per antenna into
+# FFT-sized GPU buffers, and emits raw int16 IQ to downstream operators.
+#
+# max_packet_size, header_size, and samples_per_antenna are computed by the
+# application from hsb.payload_size, hsb.custom_header_size, and num_antennas.
+# They do not need to be specified here.
+#
+hitek9081_rx:
+  interface_name: "hsb_rx_port"
+  gpu_direct: false
+  batch_size: 2048
+
+# =============================================================================
+# SpectralOp — FFT + Averaging + Magnitude (GPU DSP)
+# =============================================================================
+# Receives raw int16 IQ from Hitek9081RxOp, computes windowed FFT with optional
+# averaging, and emits normalized display coordinates for Holoviz.
+#
+# NOTE: fft_size, num_antennas, and num_averages are set via CLI args and
+# passed to both hitek9081_rx and spectral operators — no need to duplicate here.
+#
+spectral:
+  iq_swap: 2                    # 0=I,Q as-is  1=swap Q,I  2=I,Q conjugate (negate Q)
+  db_min: -130.0                # Display floor in dBFS
+  db_max: -6.0                 # Display ceiling in dBFS (0 dBFS = full scale)
+
+# =============================================================================
+# DDCOp — Digital Down-Converter (PLACEHOLDER)
+# =============================================================================
+# Receives raw int16 IQ from Hitek9081RxOp (same data as SpectralOp via fan-out).
+# When implemented: extracts a narrowband signal and outputs complex float32 IQ
+# for downstream ML inference.
+#
+ddc:
+  enabled: false                # When false, operator receives but discards data
+  center_frequency_hz: 3.5e9   # Frequency of interest (Hz)
+  bandwidth_hz: 1.0e6           # Extraction bandwidth (Hz)

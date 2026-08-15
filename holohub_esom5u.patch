@@ -1,0 +1,3138 @@
+diff --git a/applications/CMakeLists.txt b/applications/CMakeLists.txt
+index e22214d03..f606d1dc9 100644
+--- a/applications/CMakeLists.txt
++++ b/applications/CMakeLists.txt
+@@ -88,6 +88,8 @@ add_subdirectory(h264)
+ add_holohub_application(high_speed_endoscopy DEPENDS
+                         OPERATORS emergent_source)
+ 
++add_holohub_application(hermes2host)
++
+ add_holohub_application(holocat)
+ 
+ add_holohub_application(isaac_sim_holoscan_bridge)
+diff --git a/applications/hermes2host/CMakeLists.txt b/applications/hermes2host/CMakeLists.txt
+new file mode 100644
+index 000000000..c01fd7911
+--- /dev/null
++++ b/applications/hermes2host/CMakeLists.txt
+@@ -0,0 +1,18 @@
++# SPDX-FileCopyrightText: Copyright (c) 2025-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
++# SPDX-License-Identifier: Apache-2.0
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++# http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++
++if(HOLOHUB_BUILD_CPP)
++  add_subdirectory(cpp)
++endif()
+diff --git a/applications/hermes2host/README.md b/applications/hermes2host/README.md
+new file mode 100644
+index 000000000..a2526f774
+--- /dev/null
++++ b/applications/hermes2host/README.md
+@@ -0,0 +1,224 @@
++# Hermes to Host
++
++Receive high-rate IQ sensor data from a Holoscan Sensor Bridge (HSB) FPGA,
++compute windowed FFT magnitude on the GPU with optional averaging, and display
++the spectrum in real-time via Holoviz.
++
++## Pipeline
++
++```
++HermesRxOp ──→ SpectralOp ──→ HolovizOp
++(DPDK RX,       (window, FFT,    (line plot per antenna)
++ raw IQ out)     averaging,
++      │          magnitude)
++      │
++      └──→ DDCOp (placeholder: narrowband extraction for ML inference)
++```
++
++1. **Hololink bringup** — discovers the FPGA, starts the control plane, resets to a known state
++2. **DAQIRI init** — configures DPDK, binds the NIC, programs hardware flow rules
++3. **FPGA dataplane programming** — tells the FPGA the host MAC/IP/port so it starts streaming
++4. **Holoscan pipeline** — HermesRxOp receives packets and emits raw IQ; SpectralOp computes FFT + averaging on GPU; Holoviz displays
++
++## Requirements
++
++- DGX Spark or system with ConnectX NIC and NVIDIA GPU
++- HSB FPGA connected via ConnectX NIC
++- Hugepages allocated (`echo 2048 > /proc/sys/vm/nr_hugepages`)
++- NIC bound to DPDK (`dpdk-devbind.py -b vfio-pci <PCI_ADDR>`)
++- Display available (X11 or direct display for Holoviz)
++
++## Build Instructions
++
++### Step 1: Build and enter the networking container
++
++```bash
++cd ~/holohub
++./holohub run-container hermes2host \
++  --language cpp \
++  --docker-opts="-u root --privileged -w /workspace/holohub/"
++```
++
++### Step 2: Build the application inside the container - in holohub directory
++
++```bash
++./holohub build hermes2host --language=cpp --parallel $(($(nproc)-1))
++```
++
++## Configuration
++
++Edit `hermes2host.yaml` before running. Key parameters:
++
++| Parameter | Location | Description |
++|-----------|----------|-------------|
++| `hsb.hololink_ip` | YAML | HSB FPGA data-plane IP address |
++| `hsb.payload_size` | YAML | FPGA payload bytes per packet (from pcap RETH DMA_len) |
++| `hsb.mtu` | YAML | Max RoCE packet payload in bytes (must be >= payload_size, max 4096) |
++| `hsb.custom_header_size` | YAML | Bytes before IQ data in payload (0 if pure IQ) |
++| `hsb.data_port` | YAML | UDP destination port (must match flow rule `udp_dst`) |
++| `daqiri.cfg.interfaces[].address` | YAML | NIC PCI BDF (e.g., `0002:01:00.0`) |
++| `hermes_rx.num_antennas` | YAML | Number of antennas in the packet (currently 1) |
++| `spectral.dc_block_bins` | YAML | Number of center bins to blank for DC removal (0=disabled, 5=default) |
++| `spectral.iq_swap` | YAML | IQ ordering: 0=I,Q as-is, 1=swap Q,I, 2=I,Q conjugate (negate Q) |
++| `spectral.db_min` / `db_max` | YAML | Display dBFS range (e.g., -130 to -60) |
++
++The following are **computed automatically** from the above and logged at startup:
++- `max_packet_size` = 70 + payload_size + 4 (total Ethernet frame size)
++- `header_size` = 70 + custom_header_size (bytes before IQ data in the frame)
++- `samples_per_antenna` = (payload_size - custom_header_size) / (num_antennas × 4)
++- `pkt_pages` = ceil(min(mtu, payload_size) / 128) (DP_PACKET_SIZE register value)
++
++## Run Instructions
++
++```bash
++./build/hermes2host/applications/hermes2host/cpp/hermes2host \
++  /workspace/holohub/applications/hermes2host/hermes2host.yaml \
++  --sr <sample_rate_MHz> --center-freq <center_freq_MHz> [options]
++```
++
++example:
++
++./build/hermes2host/applications/hermes2host/cpp/hermes2host   /workspace/holohub/applications/hermes2host/hermes2host.yaml   --sr 250.0 --center-freq 386.0 --fft-size 65536 --freq-min 380.0 --freq-max 392.0 --num-averages 8
++
++
++**Required arguments:**
++
++| Flag | Description |
++|------|-------------|
++| `--sr MHz` | Sample rate in MHz (e.g., 245.76) |
++| `--center-freq MHz` | Center frequency in MHz (e.g., 3500) |
++
++**Optional arguments:**
++
++| Flag | Description | Default |
++|------|-------------|---------|
++| `--fft-size N` | FFT size (power of 2, 512–1048576) | 65536 |
++| `--num-averages N` | FFTs to average in linear power (power of 2, 1–32) | 1 |
++| `--freq-min MHz` | Display minimum frequency in MHz | center - sr/2 |
++| `--freq-max MHz` | Display maximum frequency in MHz | center + sr/2 |
++| `--hololink IP` | Override FPGA IP from YAML | from YAML |
++| `-h`, `--help` | Show usage | — |
++
++**Example (full band):**
++
++```bash
++./build/hermes2host/applications/hermes2host/cpp/hermes2host \
++  /workspace/holohub/applications/hermes2host/hermes2host.yaml \
++  --sr 245.76 --center-freq 3500 --fft-size 65536 --num-averages 8
++```
++
++**Example (zoomed to a sub-band):**
++
++```bash
++./build/hermes2host/applications/hermes2host/cpp/hermes2host \
++  /workspace/holohub/applications/hermes2host/hermes2host.yaml \
++  --sr 245.76 --center-freq 3500 --fft-size 65536 --num-averages 8 \
++  --freq-min 3400 --freq-max 3600
++```
++
++## Display Output
++
++Holoviz opens a window showing the FFT magnitude spectrum:
++- X-axis: frequency from `freq_min` to `freq_max` (MHz), defaults to full Nyquist band
++- Y-axis: magnitude in dBFS (configurable range via `spectral.db_min`/`spectral.db_max`)
++- Each antenna is a separate colored line (green, cyan, red, yellow)
++- Frequency tick marks at integer-MHz intervals (auto-scaled: 1, 2, 5, 10, 20, 50… MHz steps, capped at 11 ticks)
++- DC bins blanked (configurable via `spectral.dc_block_bins`)
++- Window title shows frequency range, bandwidth, and averaging count
++
++Press `Ctrl+C` to stop. DAQIRI statistics print on exit.
++
++## FFT Averaging
++
++Set `--num-averages N` to average N FFT frames in the **linear power domain**
++before converting to dB. N must be a power of 2, between 1 and 32. This reduces
++noise floor variance by approximately `10*log10(N)` dB.
++
++| num_averages | Noise reduction | Update rate (at 1.08 Mfps, 65536-pt) |
++|-------------|-----------------|---------------------------------------|
++| 1 | none | ~16 fps |
++| 8 | ~9 dB | ~2 fps |
++| 32 | ~15 dB | ~0.5 fps |
++
++## Throughput
++
++With payload_size=1408 (348 complex IQ samples per packet after 16-byte custom header, samples_per_antenna=348):
++
++```
++RX: 1.082 Mfps | 4.47 Gbps (558 MB/s payload) | 2161664 frames
++```
++
++- **Mfps** — million data frames per second (sensor data packets only)
++- **Gbps** — sensor payload data rate (IQ data only, no headers)
++
++## DDC Path (Placeholder)
++
++The `DDCOp` receives the same raw IQ data as `SpectralOp` via Holoscan's
++graph fan-out. It is currently a no-op that logs periodic receipt messages.
++
++When implemented, it will:
++1. FFT the input block
++2. Extract bins around `center_frequency_hz ± bandwidth_hz/2`
++3. IFFT the sub-band to get narrowband time-domain IQ
++4. Output reduced-rate float32 complex IQ for ML inference
++
++External control is designed via a `DDCConfig` struct that a future gRPC
++service thread will update atomically. The compute() path reads this config
++with zero locking overhead.
++
++## Changing the Payload Size
++
++When changing `hsb.payload_size`, verify these fields:
++
++1. `hsb.payload_size` — FPGA payload bytes per packet (from pcap RETH DMA_len)
++2. `hsb.mtu` — must be >= payload_size to avoid fragmentation (max 4096)
++3. `hsb.custom_header_size` — bytes before IQ data in the payload (0 if none)
++4. `daqiri buf_size` — must be >= 70 + payload_size + 4 + ~128 headroom
++
++All other RX parameters (`max_packet_size`, `header_size`, `samples_per_antenna`,
++`pkt_pages`) are computed automatically and printed at startup.
++
++### MTU and fragmentation
++
++The Holoscan IP `DP_PACKET_SIZE` register controls the max per-packet payload
++in 128-byte pages. The hololink library's `configure_common()` reads an `"mtu"`
++field from enumeration metadata to compute this value. By default (no `"mtu"` in
++metadata), it falls back to `DEFAULT_MTU` (1500), which yields a 1408-byte
++per-packet cap — causing fragmentation for any payload > 1408 bytes.
++
++`hermes2host` injects `hsb.mtu` from the YAML into the channel metadata
++**before** constructing the `DataChannel`. This ensures `configure_roce()` writes
++the correct `DP_PACKET_SIZE` on the first (and only) VP_MASK enable edge. The
++FPGA hardware latches this register at that moment and does not re-read it on
++subsequent enable cycles — post-hoc register overrides have no effect.
++
++If `mtu >= payload_size`, the entire frame fits in a single RoCE Write Only
++packet (opcode `0x2A`). If `mtu < payload_size`, the FPGA fragments into
++multiple packets (Write First `0x06` + Write Last `0x08`), which the current
++RX operator cannot reassemble — **always set `mtu >= payload_size`**.
++
++The Holoscan IP hardware supports up to 4096 bytes per packet.
++
++## Packet Structure Reference
++
++The FPGA sends RoCE v2 framed UDP packets. DAQIRI delivers the full Ethernet
++frame (Ethernet header is NOT stripped):
++
++```
++┌─────────────────────────────────────────────────────────────────┐
++│ Full frame as delivered by DAQIRI (586 bytes for payload_size=512):│
++│   Eth(14) | IP(20) | UDP(8) | BTH(12) | RETH(16) |               │
++│   payload(512) | ICRC(4)                                          │
++│   ╰─── RoCE headers (70) ───╯╰─ payload_size ─╯                  │
++├─────────────────────────────────────────────────────────────────┤
++│ BTH opcodes (at byte offset 42 from buffer start):              │
++│   0x2A = RDMA Write Only        (single-packet data frame)      │
++│   0x2B = RDMA Write Only + Imm  (metadata / frame-complete)     │
++│   0x06 = RDMA Write First       (multi-packet start)            │
++│   0x07 = RDMA Write Middle      (multi-packet continuation)     │
++│   0x08 = RDMA Write Last        (multi-packet final chunk)      │
++└─────────────────────────────────────────────────────────────────┘
++```
++
++The metadata packet (`0x2B`) is 206 bytes on wire and contains frame number,
++timestamp, and CRC. It is detected and skipped by HermesRxOp.
+diff --git a/applications/hermes2host/cpp/CMakeLists.txt b/applications/hermes2host/cpp/CMakeLists.txt
+new file mode 100644
+index 000000000..40d31e76a
+--- /dev/null
++++ b/applications/hermes2host/cpp/CMakeLists.txt
+@@ -0,0 +1,111 @@
++# SPDX-FileCopyrightText: Copyright (c) 2025-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
++# SPDX-License-Identifier: Apache-2.0
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++# http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++
++cmake_minimum_required(VERSION 3.24)
++
++set(CMAKE_CUDA_ARCHITECTURES "90;120;121" CACHE STRING "" FORCE)
++
++project(hermes2host CXX CUDA)
++
++# Dependencies
++find_package(holoscan 2.6 REQUIRED CONFIG
++             PATHS "/opt/nvidia/holoscan" "/workspace/holoscan-sdk/install")
++find_package(CUDAToolkit REQUIRED)
++
++if(DEFINED ENV{DAQIRI_ROOT})
++  list(PREPEND CMAKE_PREFIX_PATH "$ENV{DAQIRI_ROOT}")
++endif()
++list(PREPEND CMAKE_PREFIX_PATH "/opt/daqiri")
++find_package(daqiri REQUIRED CONFIG)
++include(HoloHubDaqiri)
++
++# ---------------------------------------------------------------------------
++# Fetch hololink source — only build the core library (for FPGA bringup).
++# ---------------------------------------------------------------------------
++find_package(Git REQUIRED)
++include(FetchContent)
++FetchContent_Declare(hololink
++  GIT_REPOSITORY https://github.com/nvidia-holoscan/holoscan-sensor-bridge.git
++  GIT_TAG        fc2a6cfd7e85cd04d771fbf03ac45e3e7c57b5e1
++  GIT_SHALLOW    FALSE
++  PATCH_COMMAND  /usr/bin/git apply "${CMAKE_CURRENT_LIST_DIR}/htk_esom5u_core.patch"
++)
++FetchContent_GetProperties(hololink)
++if(NOT hololink_POPULATED)
++  FetchContent_Populate(hololink)
++endif()
++
++set(HOLOLINK_SRC "${hololink_SOURCE_DIR}/src")
++find_package(fmt REQUIRED)
++
++# hololink_core (Enumerator, DataChannel, Hololink — FPGA bringup)
++add_library(hololink_core STATIC
++  ${HOLOLINK_SRC}/hololink/core/arp_wrapper.cpp
++  ${HOLOLINK_SRC}/hololink/core/data_channel.cpp
++  ${HOLOLINK_SRC}/hololink/core/enumerator.cpp
++  ${HOLOLINK_SRC}/hololink/core/hololink.cpp
++  ${HOLOLINK_SRC}/hololink/core/jesd.cpp
++  ${HOLOLINK_SRC}/hololink/core/htk_jesd.cpp
++  ${HOLOLINK_SRC}/hololink/core/logging.cpp
++  ${HOLOLINK_SRC}/hololink/core/metadata.cpp
++  ${HOLOLINK_SRC}/hololink/core/networking.cpp
++  ${HOLOLINK_SRC}/hololink/core/packetizer_program.cpp
++  ${HOLOLINK_SRC}/hololink/core/reactor.cpp
++  ${HOLOLINK_SRC}/hololink/core/timeout.cpp
++)
++target_include_directories(hololink_core PUBLIC ${HOLOLINK_SRC})
++target_link_libraries(hololink_core PUBLIC CUDA::cuda_driver fmt::fmt-header-only)
++set_property(TARGET hololink_core PROPERTY POSITION_INDEPENDENT_CODE ON)
++
++# ---------------------------------------------------------------------------
++# Application
++# ---------------------------------------------------------------------------
++add_executable(hermes2host
++  kernels.cu
++  spectral_kernels.cu
++  ddc_kernels.cu
++  main.cpp
++)
++set_target_properties(hermes2host PROPERTIES CUDA_ARCHITECTURES "90")
++target_link_libraries(hermes2host
++  PRIVATE
++    holoscan::core
++    holoscan::ops::holoviz
++    hololink_core
++    CUDA::cuda_driver
++    CUDA::cufft
++)
++holohub_link_daqiri(hermes2host)
++
++# Configure DAQIRI DPDK manager
++target_compile_definitions(hermes2host PUBLIC DAQIRI_MGR_DPDK=1)
++
++# Copy config file to build directory
++add_custom_target(hermes2host_config
++  COMMAND ${CMAKE_COMMAND} -E copy_if_different
++    "${CMAKE_CURRENT_SOURCE_DIR}/../hermes2host.yaml"
++    "${CMAKE_CURRENT_BINARY_DIR}"
++  DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/../hermes2host.yaml"
++)
++add_dependencies(hermes2host hermes2host_config)
++
++# Installation
++install(TARGETS hermes2host
++        DESTINATION examples/hermes2host
++        COMPONENT hermes2host-cpp)
++
++install(FILES ../hermes2host.yaml
++        DESTINATION examples/hermes2host
++        COMPONENT hermes2host-configs)
+diff --git a/applications/hermes2host/cpp/ddc_kernels.cu b/applications/hermes2host/cpp/ddc_kernels.cu
+new file mode 100644
+index 000000000..4d4347399
+--- /dev/null
++++ b/applications/hermes2host/cpp/ddc_kernels.cu
+@@ -0,0 +1,38 @@
++/*
++ * SPDX-FileCopyrightText: Copyright (c) 2025-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
++ * SPDX-License-Identifier: Apache-2.0
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ * http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#include "ddc_kernels.cuh"
++
++// =============================================================================
++// DDC kernel implementations — STUB
++// =============================================================================
++
++void ddc_extract_subband(const cufftComplex* /*in*/, cufftComplex* /*out*/,
++                         int /*center_bin*/, int /*num_bins*/, int /*fft_size*/,
++                         cudaStream_t /*stream*/) {
++  // TODO: implement frequency-domain extraction
++  //
++  // __global__ void extract_subband_kernel(...)
++  // {
++  //   int i = blockIdx.x * blockDim.x + threadIdx.x;
++  //   if (i >= num_bins) return;
++  //
++  //   // Map output bin i to input FFT bin (with wraparound for negative freqs)
++  //   int src_bin = (center_bin - num_bins/2 + i + fft_size) % fft_size;
++  //   out[i] = in[src_bin];
++  // }
++}
+diff --git a/applications/hermes2host/cpp/ddc_kernels.cuh b/applications/hermes2host/cpp/ddc_kernels.cuh
+new file mode 100644
+index 000000000..29c2d13bf
+--- /dev/null
++++ b/applications/hermes2host/cpp/ddc_kernels.cuh
+@@ -0,0 +1,53 @@
++/*
++ * SPDX-FileCopyrightText: Copyright (c) 2025-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
++ * SPDX-License-Identifier: Apache-2.0
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ * http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#pragma once
++
++#include <cuda_runtime.h>
++#include <cufft.h>
++#include <cstdint>
++
++// =============================================================================
++// DDC (Digital Down-Converter) CUDA Kernels — PLACEHOLDER
++// =============================================================================
++//
++// Future algorithm:
++//   1. FFT the input block (reuse cuFFT plan, same fft_size as spectral path)
++//   2. Circular-shift to move center_frequency to DC (baseband)
++//   3. Zero bins outside ±bandwidth/2 (brick-wall filter in freq domain)
++//      OR: multiply by a raised-cosine window for smoother rolloff
++//   4. IFFT the sub-band → narrowband time-domain IQ
++//   5. Decimate by ratio = fft_size / num_extracted_bins
++//   6. Output: float32 complex IQ at reduced sample rate
++//
++// Performance considerations:
++//   - At ~16 Hz input rate (65536-pt blocks), even a full FFT+IFFT is trivial
++//   - Can batch multiple antennas into a single cufftPlanMany call
++//   - Overlap-save method could be used for continuous streaming without gaps
++// =============================================================================
++
++// Extract frequency bins around a center bin, applying a window for rolloff.
++// in:       cufftComplex[fft_size] (FFT output, not fftshifted)
++// out:      cufftComplex[num_bins] (extracted sub-band, shifted to baseband)
++// center_bin: which bin corresponds to the desired center frequency
++// num_bins:   number of bins to extract (= bandwidth / bin_resolution)
++// fft_size:   total FFT length
++//
++// STUB — not yet implemented.
++void ddc_extract_subband(const cufftComplex* in, cufftComplex* out,
++                         int center_bin, int num_bins, int fft_size,
++                         cudaStream_t stream);
+diff --git a/applications/hermes2host/cpp/ddc_op.h b/applications/hermes2host/cpp/ddc_op.h
+new file mode 100644
+index 000000000..267a3ee8c
+--- /dev/null
++++ b/applications/hermes2host/cpp/ddc_op.h
+@@ -0,0 +1,176 @@
++/*
++ * SPDX-FileCopyrightText: Copyright (c) 2025-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
++ * SPDX-License-Identifier: Apache-2.0
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ * http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++/*
++ * DDCOp — Digital Down-Converter operator (PLACEHOLDER)
++ *
++ * Receives raw wideband IQ data from HermesRxOp, extracts a narrowband signal
++ * centered on a configurable frequency, and outputs reduced-rate complex IQ
++ * suitable for downstream ML inference.
++ *
++ * =============================================================================
++ * External Control Interface
++ * =============================================================================
++ *
++ * The DDC parameters (center_frequency_hz, bandwidth_hz) are intended to be
++ * updated at runtime by an external controller. The architecture:
++ *
++ *   ┌─────────────────────┐         ┌──────────────────────────┐
++ *   │  gRPC Server Thread │──write─→│  std::atomic<DDCConfig>  │
++ *   │  (listens on port)  │         │  (lock-free, 1 cache line)│
++ *   └─────────────────────┘         └──────────────────────────┘
++ *                                              ↑ read (trivial, ~2ns)
++ *                                   ┌──────────────────────────┐
++ *                                   │  DDCOp::compute()         │
++ *                                   │  (called at ~16 Hz)       │
++ *                                   └──────────────────────────┘
++ *
++ * The gRPC service definition (future, in a .proto file):
++ *
++ *   service DDCControl {
++ *     rpc SetConfig(DDCConfigRequest) returns (DDCConfigResponse);
++ *     rpc GetConfig(Empty) returns (DDCConfigResponse);
++ *   }
++ *
++ *   message DDCConfigRequest {
++ *     double center_frequency_hz = 1;
++ *     double bandwidth_hz = 2;
++ *   }
++ *
++ * Implementation steps when ready:
++ *   1. Add grpc/protobuf to CMakeLists.txt dependencies
++ *   2. Generate service stubs from .proto
++ *   3. Spawn grpc::Server on a dedicated thread in DDCOp::initialize()
++ *   4. ServiceImpl::SetConfig() writes to config_ atomically
++ *   5. DDCOp::compute() reads config_ — no locking, no blocking
++ *   6. Shut down server in DDCOp destructor
++ *
++ * =============================================================================
++ * DSP Algorithm (to implement)
++ * =============================================================================
++ *
++ * Input:  [num_antennas × fft_size × 2] int16 IQ from HermesRxOp
++ * Output: [num_antennas × output_len × 2] float32 complex IQ (narrowband)
++ *
++ * Per antenna:
++ *   1. Window + FFT (same as SpectralOp — could share plan or create own)
++ *   2. Identify bin range: center_bin ± num_bins/2
++ *      where center_bin = (center_freq - tuned_center) / bin_width + fft_size/2
++ *      and   num_bins = bandwidth_hz / bin_width
++ *   3. Extract sub-band bins (circular addressing for wraparound)
++ *   4. IFFT the num_bins-length sub-band → time-domain narrowband IQ
++ *   5. Output rate = sample_rate * (num_bins / fft_size)
++ *
++ * At 65536-pt FFT / 245.76 MHz → bin_width = 3.75 kHz
++ * For 1 MHz bandwidth → ~267 bins → output rate = ~1 MHz
++ *
++ * =============================================================================
++ */
++
++#pragma once
++
++#include "holoscan/holoscan.hpp"
++#include "ddc_kernels.cuh"
++#include <chrono>
++
++namespace holoscan::ops {
++
++struct DDCConfig {
++  double center_frequency_hz = 0.0;
++  double bandwidth_hz = 1.0e6;
++
++  bool operator==(const DDCConfig& o) const {
++    return center_frequency_hz == o.center_frequency_hz &&
++           bandwidth_hz == o.bandwidth_hz;
++  }
++};
++
++class DDCOp : public Operator {
++ public:
++  HOLOSCAN_OPERATOR_FORWARD_ARGS(DDCOp)
++  DDCOp() = default;
++
++  void setup(OperatorSpec& spec) override {
++    spec.input<holoscan::TensorMap>("iq_in");
++    // Future: output narrowband IQ for ML inference
++    // spec.output<holoscan::TensorMap>("iq_out");
++
++    spec.param(enabled_, "enabled", "Enabled",
++               "When false, operator receives but discards data", false);
++    spec.param(center_frequency_hz_, "center_frequency_hz", "Center frequency (Hz)",
++               "Frequency of interest for extraction", 3.5e9);
++    spec.param(bandwidth_hz_, "bandwidth_hz", "Bandwidth (Hz)",
++               "Extraction bandwidth", 1.0e6);
++  }
++
++  void initialize() override {
++    Operator::initialize();
++
++    config_.center_frequency_hz = center_frequency_hz_.get();
++    config_.bandwidth_hz = bandwidth_hz_.get();
++
++    // Future: start gRPC server thread here
++    // grpc_server_ = start_ddc_grpc_server(port, &config_);
++
++    HOLOSCAN_LOG_INFO("DDCOp::initialize() — enabled={}, center={:.3f} MHz, bw={:.3f} kHz",
++                      enabled_.get(),
++                      config_.center_frequency_hz / 1e6,
++                      config_.bandwidth_hz / 1e3);
++  }
++
++  void compute(InputContext& op_input, OutputContext& /*op_output*/,
++               ExecutionContext& /*context*/) override {
++    auto maybe_input = op_input.receive<holoscan::TensorMap>("iq_in");
++    if (!maybe_input) return;
++
++    if (!enabled_.get()) return;
++
++    frames_received_++;
++
++    // Periodic status log (every ~5 seconds at 16 Hz)
++    auto now = std::chrono::steady_clock::now();
++    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
++        now - last_log_time_).count();
++    if (elapsed >= 5000) {
++      HOLOSCAN_LOG_INFO("DDCOp: {} frames received | center={:.3f} MHz | bw={:.3f} kHz [no-op]",
++                        frames_received_, config_.center_frequency_hz / 1e6,
++                        config_.bandwidth_hz / 1e3);
++      last_log_time_ = now;
++    }
++
++    // TODO: when implementing DSP:
++    // 1. Extract antenna tensors from input TensorMap
++    // 2. For each antenna:
++    //    a. Window + FFT (own cuFFT plan, own stream)
++    //    b. ddc_extract_subband(fft_out, subband, center_bin, num_bins, fft_size, stream)
++    //    c. IFFT subband → narrowband IQ (float32)
++    // 3. Emit narrowband IQ TensorMap on "iq_out"
++  }
++
++ private:
++  DDCConfig config_;
++  int64_t frames_received_ = 0;
++  std::chrono::steady_clock::time_point last_log_time_ = std::chrono::steady_clock::now();
++
++  // Future: std::unique_ptr<grpc::Server> grpc_server_;
++
++  Parameter<bool> enabled_;
++  Parameter<double> center_frequency_hz_;
++  Parameter<double> bandwidth_hz_;
++};
++
++}  // namespace holoscan::ops
+diff --git a/applications/hermes2host/cpp/hermes2host_rx_op.h b/applications/hermes2host/cpp/hermes2host_rx_op.h
+new file mode 100644
+index 000000000..5526c461c
+--- /dev/null
++++ b/applications/hermes2host/cpp/hermes2host_rx_op.h
+@@ -0,0 +1,526 @@
++/*
++ * SPDX-FileCopyrightText: Copyright (c) 2025-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
++ * SPDX-License-Identifier: Apache-2.0
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ * http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++/*
++ * HermesRxOp — DPDK packet reception only
++ *
++ * Receives RoCE-framed UDP packets from the HSB FPGA via DAQIRI DPDK,
++ * filters metadata packets, accumulates IQ samples per antenna into
++ * FFT-sized GPU buffers, and emits raw int16 IQ for downstream processing.
++ *
++ * Output: TensorMap with one [fft_size, 2] int16 tensor per antenna
++ *         (raw I,Q pairs on GPU). Emitted when fft_size samples are accumulated.
++ *
++ * Downstream consumers (via fan-out):
++ *   - SpectralOp: windowed FFT + magnitude for display
++ *   - DDCOp: narrowband extraction for ML inference (future)
++ *
++ * See hermes2host_rx_op.h header comment in prior commits for RoCE packet
++ * structure documentation (opcodes, header offsets, etc.)
++ */
++
++#pragma once
++
++#include "holoscan/holoscan.hpp"
++#include <daqiri/daqiri.h>
++#include "kernels.cuh"
++#include "spectral_kernels.cuh"
++#include <dlpack/dlpack.h>
++#include <algorithm>
++#include <queue>
++#include <array>
++#include <vector>
++#include <chrono>
++#include <cstdio>
++#include <ctime>
++
++#define CUDA_TRY(stmt)                                                                          \
++  ({                                                                                            \
++    cudaError_t _holoscan_cuda_err = stmt;                                                      \
++    if (cudaSuccess != _holoscan_cuda_err) {                                                    \
++      HOLOSCAN_LOG_ERROR("CUDA Runtime call %s in line %d of file %s failed with '%s' (%d).\n", \
++                         #stmt,                                                                 \
++                         __LINE__,                                                              \
++                         __FILE__,                                                              \
++                         cudaGetErrorString(_holoscan_cuda_err),                                \
++                         static_cast<int>(_holoscan_cuda_err));                                 \
++    }                                                                                           \
++  })
++
++using namespace daqiri;
++
++namespace holoscan::ops {
++
++// RoCE BTH layout — offsets from start of DAQIRI buffer (full Ethernet frame)
++static constexpr int BTH_OPCODE_OFFSET = 42;  // Eth(14) + IP(20) + UDP(8) = start of BTH
++static constexpr int BTH_PSN_OFFSET = 50;     // BTH+8: AckReq(1)+Reserved(7)+PSN(24)
++static constexpr uint8_t ROCE_WRITE_ONLY_IMM = 0x2B;
++
++class HermesRxOp : public Operator {
++ public:
++  HOLOSCAN_OPERATOR_FORWARD_ARGS(HermesRxOp)
++  HermesRxOp() = default;
++
++  ~HermesRxOp() {
++    HOLOSCAN_LOG_INFO("HermesRxOp: {} data frames | {} payload bytes | {} dropped | {} metadata skipped | {} PSN gaps ({} missing pkts)",
++                      ttl_data_frames_, ttl_payload_bytes_,
++                      ttl_packets_dropped_, ttl_metadata_pkts_,
++                      ttl_psn_gaps_, ttl_psn_gap_pkts_);
++    if (raw_dump_file_) fclose(raw_dump_file_);
++    if (raw_dump_pkt_file_) fclose(raw_dump_pkt_file_);
++    freeResources();
++  }
++
++  void initialize() override {
++    Operator::initialize();
++
++    port_id_ = get_port_id(interface_name_.get());
++    if (port_id_ < 0) {
++      HOLOSCAN_LOG_ERROR("Could not find DAQIRI port: {}", interface_name_.get());
++      exit(1);
++    }
++
++    nom_payload_size_ = max_packet_size_.get() - header_size_.get();
++
++    // RX batch buffers (for DPDK burst accumulation)
++    for (int n = 0; n < num_concurrent; n++) {
++      if (gpu_direct_.get()) {
++        CUDA_TRY(cudaMallocHost((void**)&h_dev_ptrs_[n], sizeof(void*) * batch_size_.get()));
++      } else {
++        CUDA_TRY(cudaMallocHost(&full_batch_data_h_[n], batch_size_.get() * nom_payload_size_));
++      }
++      CUDA_TRY(cudaMalloc(&full_batch_data_d_[n], batch_size_.get() * nom_payload_size_));
++      cudaStreamCreate(&rx_streams_[n]);
++      cudaEventCreate(&rx_events_[n]);
++      dummy_packet_reorder(NULL, NULL, 1, 1, rx_streams_[n]);
++      cudaStreamSynchronize(rx_streams_[n]);
++    }
++
++    // IQ accumulation buffers (ring of NUM_ACCUM_BUFS for zero-copy emit)
++    const int N = fft_size_.get();
++    const int A = num_antennas_.get();
++    cudaStreamCreate(&accum_stream_);
++
++    for (int b = 0; b < NUM_ACCUM_BUFS; b++) {
++      accum_bufs_[b].resize(A, nullptr);
++      for (int a = 0; a < A; a++) {
++        cudaMalloc(&accum_bufs_[b][a], N * 2 * sizeof(int16_t));
++        cudaMemsetAsync(accum_bufs_[b][a], 0, N * 2 * sizeof(int16_t), accum_stream_);
++      }
++    }
++
++    // Output snapshot buffers — decoupled from the accum ring so downstream
++    // never reads a buffer that's being overwritten.
++    for (int b = 0; b < NUM_OUTPUT_BUFS; b++) {
++      output_bufs_[b].resize(A, nullptr);
++      for (int a = 0; a < A; a++) {
++        cudaMalloc(&output_bufs_[b][a], N * 2 * sizeof(int16_t));
++      }
++    }
++
++    cudaStreamSynchronize(accum_stream_);
++    HOLOSCAN_LOG_INFO("HermesRxOp::initialize() — payload={} batch={} fft={} antennas={} bufs={}",
++                      nom_payload_size_, batch_size_.get(), N, A, NUM_ACCUM_BUFS);
++  }
++
++  void setup(OperatorSpec& spec) override {
++    spec.output<holoscan::TensorMap>("iq_out")
++        .connector(holoscan::IOSpec::ConnectorType::kDoubleBuffer,
++                   holoscan::Arg("capacity", static_cast<uint64_t>(4)),
++                   holoscan::Arg("policy", static_cast<uint64_t>(0)));
++
++    spec.param<std::string>(interface_name_, "interface_name", "Port name",
++               "Name of the RX port from DAQIRI config", "hsb_rx_port");
++    spec.param<bool>(gpu_direct_, "gpu_direct", "GPUDirect enabled",
++               "Whether GPUDirect is enabled for RX queues", true);
++    spec.param<uint32_t>(batch_size_, "batch_size", "Batch size",
++               "Batch size in packets for each processing epoch", 1024);
++    spec.param<uint16_t>(max_packet_size_, "max_packet_size", "Max packet size",
++               "Maximum packet size including headers", 586);
++    spec.param<uint16_t>(header_size_, "header_size", "Header size",
++               "Bytes to skip to reach payload", 70);
++    spec.param<int>(fft_size_, "fft_size", "FFT size",
++               "Number of complex samples to accumulate before emitting", 65536);
++    spec.param<int>(num_antennas_, "num_antennas", "Number of antennas",
++               "Number of antennas in the packet", 1);
++    spec.param<int>(samples_per_antenna_, "samples_per_antenna", "Samples per antenna",
++               "Complex samples per antenna per packet", 128);
++  }
++
++  void compute(InputContext& op_input, OutputContext& op_output,
++               ExecutionContext& context) override {
++    free_processed_packets();
++
++    BurstParams *burst;
++    const auto num_rx_queues = get_num_rx_queues(port_id_);
++
++    for (int q = 0; q < num_rx_queues; q++) {
++      auto status = get_rx_burst(&burst, port_id_, q);
++      if (status != Status::SUCCESS) continue;
++
++      auto burst_size = get_num_packets(burst);
++      ttl_pkts_recv_ += burst_size;
++
++      if (cur_batch_.num_bursts >= MAX_BURSTS_PER_BATCH) {
++        free_all_packets_and_burst_rx(burst);
++        ttl_packets_dropped_ += burst_size;
++        continue;
++      }
++      cur_batch_.bursts[cur_batch_.num_bursts++] = burst;
++
++      for (int p = 0; p < burst_size; p++) {
++        auto pkt_ptr = reinterpret_cast<uint8_t*>(get_segment_packet_ptr(burst, 0, p));
++        auto pkt_len = get_segment_packet_length(burst, 0, p);
++
++        // Filter metadata packets (RoCE opcode 0x2B)
++        if (pkt_len > BTH_OPCODE_OFFSET) {
++          if (pkt_ptr[BTH_OPCODE_OFFSET] == ROCE_WRITE_ONLY_IMM) {
++            ttl_metadata_pkts_++;
++            continue;
++          }
++        }
++
++        // Extract PSN (24-bit) from BTH bytes 9-11 (byte 8 is AckReq|Rsvd)
++        if (pkt_len > BTH_PSN_OFFSET + 3) {
++          uint32_t psn = (static_cast<uint32_t>(pkt_ptr[BTH_PSN_OFFSET + 1]) << 16) |
++                         (static_cast<uint32_t>(pkt_ptr[BTH_PSN_OFFSET + 2]) << 8) |
++                          static_cast<uint32_t>(pkt_ptr[BTH_PSN_OFFSET + 3]);
++          if (psn_log_count_ < 10) {
++            HOLOSCAN_LOG_INFO("PSN sample [{}]: raw bytes @{}: {:02x} {:02x} {:02x} {:02x} → PSN={}",
++                              psn_log_count_, BTH_PSN_OFFSET,
++                              pkt_ptr[BTH_PSN_OFFSET], pkt_ptr[BTH_PSN_OFFSET + 1],
++                              pkt_ptr[BTH_PSN_OFFSET + 2], pkt_ptr[BTH_PSN_OFFSET + 3], psn);
++            psn_log_count_++;
++          }
++          if (last_psn_valid_) {
++            uint32_t expected = (last_psn_ + 2) & 0x00FFFFFF;
++            if (psn != expected) {
++              uint32_t gap = ((psn - last_psn_) / 2 - 1) & 0x00FFFFFF;
++              ttl_psn_gaps_++;
++              ttl_psn_gap_pkts_ += gap;
++            }
++          }
++          last_psn_ = psn;
++          last_psn_valid_ = true;
++        }
++
++        int payload_len = static_cast<int>(pkt_len) - static_cast<int>(header_size_.get());
++        if (payload_len <= 0 || payload_len > nom_payload_size_) {
++          aggr_pkts_recv_++;
++          continue;
++        }
++
++        if (gpu_direct_.get()) {
++          h_dev_ptrs_[cur_batch_idx_][aggr_pkts_recv_] = pkt_ptr + header_size_.get();
++        } else {
++          auto offset = aggr_pkts_recv_ * nom_payload_size_;
++          memcpy((char*)full_batch_data_h_[cur_batch_idx_] + offset,
++                pkt_ptr + header_size_.get(), payload_len);
++        }
++
++        // DEBUG: accumulate one full FFT worth of samples (fft_size_) into dump
++        if (raw_dump_samples_ < fft_size_.get()) {
++          int num_samp = samples_per_antenna_.get();
++          const int16_t* samples;
++          std::vector<int16_t> tmp_host_buf;
++          if (gpu_direct_.get()) {
++            tmp_host_buf.resize(num_samp * 2);
++            cudaMemcpy(tmp_host_buf.data(), pkt_ptr + header_size_.get(),
++                       num_samp * 2 * sizeof(int16_t), cudaMemcpyDeviceToHost);
++            samples = tmp_host_buf.data();
++          } else {
++            samples = reinterpret_cast<const int16_t*>(pkt_ptr + header_size_.get());
++          }
++          if (!raw_dump_file_) {
++            raw_dump_file_ = fopen("/tmp/hermes_raw_iq_dump.bin", "wb");
++            if (raw_dump_file_) {
++              HOLOSCAN_LOG_INFO("=== Dumping {} samples to /tmp/hermes_raw_iq_dump.bin ===", fft_size_.get());
++            }
++          }
++          if (!raw_dump_pkt_file_) {
++            raw_dump_pkt_file_ = fopen("/tmp/hermes_raw_pkt_dump.pcap", "wb");
++            if (raw_dump_pkt_file_) {
++              // PCAP global header: magic, version 2.4, GMT offset 0, accuracy 0, snaplen, LINKTYPE_ETHERNET(1)
++              struct { uint32_t magic, ver, tz, sig, snaplen, linktype; }
++                hdr = { 0xa1b2c3d4, (2u<<16)|4u, 0, 0, 65535, 1 };
++              fwrite(&hdr, sizeof(hdr), 1, raw_dump_pkt_file_);
++              HOLOSCAN_LOG_INFO("=== Dumping full packets to /tmp/hermes_raw_pkt_dump.pcap ===");
++            }
++          }
++          if (raw_dump_file_) {
++            int to_write = std::min(num_samp, fft_size_.get() - raw_dump_samples_);
++            fwrite(samples, sizeof(int16_t), to_write * 2, raw_dump_file_);
++            raw_dump_samples_ += to_write;
++            if (raw_dump_samples_ >= fft_size_.get()) {
++              fclose(raw_dump_file_);
++              raw_dump_file_ = nullptr;
++              HOLOSCAN_LOG_INFO("=== Raw IQ dump complete: {} complex samples written ===", raw_dump_samples_);
++            }
++          }
++          // Write PCAP packet record: 16-byte header + raw Ethernet frame
++          if (raw_dump_pkt_file_) {
++            struct timespec ts;
++            clock_gettime(CLOCK_REALTIME, &ts);
++            uint32_t pkt_len32 = static_cast<uint32_t>(pkt_len);
++            struct { uint32_t ts_sec, ts_usec, cap_len, orig_len; }
++              phdr = { static_cast<uint32_t>(ts.tv_sec),
++                       static_cast<uint32_t>(ts.tv_nsec / 1000),
++                       pkt_len32, pkt_len32 };
++            fwrite(&phdr, sizeof(phdr), 1, raw_dump_pkt_file_);
++            fwrite(pkt_ptr, 1, pkt_len, raw_dump_pkt_file_);
++            if (raw_dump_samples_ >= fft_size_.get()) {
++              fclose(raw_dump_pkt_file_);
++              raw_dump_pkt_file_ = nullptr;
++              HOLOSCAN_LOG_INFO("=== Full packet dump complete ===");
++            }
++          }
++        }
++
++        ttl_data_frames_++;
++        ttl_payload_bytes_ += payload_len;
++        aggr_pkts_recv_++;
++
++        if (aggr_pkts_recv_ >= batch_size_.get()) {
++          aggr_pkts_recv_ = 0;
++          process_batch(op_output);
++        }
++      }
++    }
++
++    // Throughput logging
++    auto now = std::chrono::steady_clock::now();
++    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
++        now - last_report_time_).count();
++    if (elapsed >= 2000) {
++      double secs = elapsed / 1000.0;
++      int64_t delta_frames = ttl_data_frames_ - last_report_frames_;
++      int64_t delta_bytes = ttl_payload_bytes_ - last_report_bytes_;
++      double mfps = delta_frames / (secs * 1e6);
++      double payload_gbps = delta_bytes * 8.0 / (secs * 1e9);
++      double payload_mbps = delta_bytes / (secs * 1e6);
++      HOLOSCAN_LOG_INFO("RX: {:.3f} Mfps | {:.2f} Gbps ({:.0f} MB/s) | {} frames | PSN gaps: {}",
++                        mfps, payload_gbps, payload_mbps, ttl_data_frames_, ttl_psn_gaps_);
++      last_report_frames_ = ttl_data_frames_;
++      last_report_bytes_ = ttl_payload_bytes_;
++      last_report_time_ = now;
++    }
++  }
++
++ private:
++  static constexpr int num_concurrent = 10;
++  static constexpr int MAX_BURSTS_PER_BATCH = 256;
++  static constexpr int NUM_ACCUM_BUFS = 32;
++  static constexpr int NUM_OUTPUT_BUFS = 4;
++
++  struct BatchAggregationParams {
++    std::array<BurstParams*, MAX_BURSTS_PER_BATCH> bursts;
++    int num_bursts;
++    cudaEvent_t evt;
++  };
++
++  void free_processed_packets() {
++    while (batch_q_.size() > 0) {
++      const auto batch = batch_q_.front();
++      if (cudaEventQuery(batch.evt) == cudaSuccess) {
++        for (auto m = 0; m < batch.num_bursts; m++) {
++          free_all_packets_and_burst_rx(batch.bursts[m]);
++        }
++        batch_q_.pop();
++      } else {
++        break;
++      }
++    }
++  }
++
++  void process_batch(OutputContext& op_output) {
++    free_processed_packets();
++    if (batch_q_.size() == static_cast<size_t>(num_concurrent)) {
++      HOLOSCAN_LOG_ERROR("Fell behind — dropping batch!");
++      for (auto m = 0; m < cur_batch_.num_bursts; m++) {
++        ttl_packets_dropped_ += get_num_packets(cur_batch_.bursts[m]);
++        free_all_packets_and_burst_rx(cur_batch_.bursts[m]);
++      }
++      cur_batch_.num_bursts = 0;
++      return;
++    }
++
++    int idx = cur_batch_idx_;
++    if (gpu_direct_.get()) {
++      dummy_packet_reorder(static_cast<uint8_t*>(full_batch_data_d_[idx]),
++                           h_dev_ptrs_[idx], nom_payload_size_,
++                           batch_size_.get(), rx_streams_[idx]);
++    } else {
++      cudaMemcpyAsync(full_batch_data_d_[idx], full_batch_data_h_[idx],
++                      batch_size_.get() * nom_payload_size_,
++                      cudaMemcpyDefault, rx_streams_[idx]);
++    }
++
++    cudaEventRecord(rx_events_[idx], rx_streams_[idx]);
++    cur_batch_.evt = rx_events_[idx];
++    batch_q_.push(cur_batch_);
++
++    // Accumulate IQ from this batch into the current accumulation buffer
++    cudaStreamWaitEvent(accum_stream_, rx_events_[idx], 0);
++    accumulate_batch(full_batch_data_d_[idx], op_output);
++
++    cur_batch_.num_bursts = 0;
++    cur_batch_idx_ = (++cur_batch_idx_ % num_concurrent);
++  }
++
++  void accumulate_batch(void* batch_gpu, OutputContext& op_output) {
++    const int S = samples_per_antenna_.get();
++    const int N = fft_size_.get();
++    const int pkts_in_batch = batch_size_.get();
++    int pkts_remaining = pkts_in_batch;
++    int pkt_offset = 0;
++
++    while (pkts_remaining > 0) {
++      int samples_needed = N - accum_offset_;
++      int pkts_needed = (samples_needed + S - 1) / S;
++      int pkts_to_copy = std::min(pkts_needed, pkts_remaining);
++      int samples_to_copy = std::min(pkts_to_copy * S, samples_needed);
++
++      const uint8_t* src = static_cast<const uint8_t*>(batch_gpu) + pkt_offset * nom_payload_size_;
++      for (int a = 0; a < num_antennas_.get(); a++) {
++        gather_iq_from_batch(src, static_cast<int16_t*>(accum_bufs_[active_buf_][a]),
++                             pkts_to_copy, S, nom_payload_size_,
++                             accum_offset_, accum_stream_);
++      }
++
++      accum_offset_ += samples_to_copy;
++      pkt_offset += pkts_to_copy;
++      pkts_remaining -= pkts_to_copy;
++
++      if (accum_offset_ >= N) {
++        accum_offset_ = 0;
++        emit_iq(op_output);
++      }
++    }
++  }
++
++  void emit_iq(OutputContext& op_output) {
++    cudaStreamSynchronize(accum_stream_);
++
++    const int A = num_antennas_.get();
++    const int N = fft_size_.get();
++    const int src_buf = active_buf_;
++    const int dst_buf = active_output_buf_;
++    active_output_buf_ = (active_output_buf_ + 1) % NUM_OUTPUT_BUFS;
++
++    // Copy to a dedicated output buffer so the accum ring can be reused immediately
++    for (int a = 0; a < A; a++) {
++      cudaMemcpy(output_bufs_[dst_buf][a], accum_bufs_[src_buf][a],
++                 N * 2 * sizeof(int16_t), cudaMemcpyDeviceToDevice);
++    }
++
++    // Advance accum ring buffer slot
++    active_buf_ = (active_buf_ + 1) % NUM_ACCUM_BUFS;
++
++    holoscan::TensorMap out_msg;
++
++    for (int a = 0; a < A; a++) {
++      std::string key = "antenna_" + std::to_string(a);
++
++      DLManagedTensor* dl = new DLManagedTensor();
++      dl->dl_tensor.data = output_bufs_[dst_buf][a];
++      dl->dl_tensor.device = DLDevice{kDLCUDA, 0};
++      dl->dl_tensor.ndim = 2;
++      dl->dl_tensor.dtype = DLDataType{kDLInt, 16, 1};
++      dl->dl_tensor.shape = new int64_t[2]{N, 2};
++      dl->dl_tensor.strides = nullptr;
++      dl->dl_tensor.byte_offset = 0;
++      dl->manager_ctx = nullptr;
++      dl->deleter = [](DLManagedTensor* self) {
++        delete[] self->dl_tensor.shape;
++        delete self;
++      };
++      out_msg[key] = std::make_shared<holoscan::Tensor>(dl);
++    }
++
++    op_output.emit(out_msg, "iq_out");
++  }
++
++  void freeResources() {
++    for (int n = 0; n < num_concurrent; n++) {
++      if (full_batch_data_d_[n]) cudaFree(full_batch_data_d_[n]);
++      if (full_batch_data_h_[n]) cudaFreeHost(full_batch_data_h_[n]);
++      if (h_dev_ptrs_[n]) cudaFreeHost(h_dev_ptrs_[n]);
++      if (rx_streams_[n]) cudaStreamDestroy(rx_streams_[n]);
++      if (rx_events_[n]) cudaEventDestroy(rx_events_[n]);
++    }
++    for (int b = 0; b < NUM_ACCUM_BUFS; b++) {
++      for (auto p : accum_bufs_[b]) { if (p) cudaFree(p); }
++    }
++    for (int b = 0; b < NUM_OUTPUT_BUFS; b++) {
++      for (auto p : output_bufs_[b]) { if (p) cudaFree(p); }
++    }
++    if (accum_stream_) cudaStreamDestroy(accum_stream_);
++  }
++
++  // RX state
++  int port_id_;
++  BatchAggregationParams cur_batch_{};
++  int cur_batch_idx_ = 0;
++  std::queue<BatchAggregationParams> batch_q_;
++  int64_t ttl_payload_bytes_ = 0;
++  int64_t ttl_data_frames_ = 0;
++  int64_t ttl_pkts_recv_ = 0;
++  int64_t aggr_pkts_recv_ = 0;
++  int64_t ttl_packets_dropped_ = 0;
++  int64_t ttl_metadata_pkts_ = 0;
++  uint32_t last_psn_ = 0;
++  bool last_psn_valid_ = false;
++  int64_t ttl_psn_gaps_ = 0;
++  int64_t ttl_psn_gap_pkts_ = 0;
++  int psn_log_count_ = 0;
++  int raw_dump_samples_ = 0;
++  FILE* raw_dump_file_ = nullptr;
++  FILE* raw_dump_pkt_file_ = nullptr;
++  uint16_t nom_payload_size_;
++  std::array<void**, num_concurrent> h_dev_ptrs_{};
++  std::array<void*, num_concurrent> full_batch_data_d_{};
++  std::array<void*, num_concurrent> full_batch_data_h_{};
++  std::array<cudaStream_t, num_concurrent> rx_streams_{};
++  std::array<cudaEvent_t, num_concurrent> rx_events_{};
++
++  // IQ accumulation (ring buffer — internal, never exposed downstream)
++  cudaStream_t accum_stream_ = nullptr;
++  std::vector<void*> accum_bufs_[NUM_ACCUM_BUFS];
++  int active_buf_ = 0;
++  int accum_offset_ = 0;
++
++  // Output snapshot buffers (published downstream — safe from accum overwrites)
++  std::vector<void*> output_bufs_[NUM_OUTPUT_BUFS];
++  int active_output_buf_ = 0;
++
++  // Parameters
++  Parameter<std::string> interface_name_;
++  Parameter<bool> gpu_direct_;
++  Parameter<uint32_t> batch_size_;
++  Parameter<uint16_t> max_packet_size_;
++  Parameter<uint16_t> header_size_;
++  Parameter<int> fft_size_;
++  Parameter<int> num_antennas_;
++  Parameter<int> samples_per_antenna_;
++
++  // Throughput reporting
++  std::chrono::steady_clock::time_point last_report_time_ = std::chrono::steady_clock::now();
++  int64_t last_report_frames_ = 0;
++  int64_t last_report_bytes_ = 0;
++};
++
++}  // namespace holoscan::ops
+diff --git a/applications/hermes2host/cpp/htk_esom5u_core.patch b/applications/hermes2host/cpp/htk_esom5u_core.patch
+new file mode 100644
+index 000000000..5a28f7be8
+--- /dev/null
++++ b/applications/hermes2host/cpp/htk_esom5u_core.patch
+@@ -0,0 +1,371 @@
++diff --git a/python/hololink/__init__.py b/python/hololink/__init__.py
++index 0a219e3..cf66e14 100755
++--- a/python/hololink/__init__.py
+++++ b/python/hololink/__init__.py
++@@ -93,6 +93,7 @@ from ._hololink import (
++     Enumerator,
++     Hololink,
++     HsbLogLevel,
+++    HTK_JESD_HPS_Config,
++     ImGuiRenderer,
++     Metadata,
++     NvtxTrace,
++@@ -178,6 +179,7 @@ __all__ = [
++     "HSB_LOG_LEVEL_INVALID",
++     "HsbLogLevel",
++     "Hololink",
+++    "HTK_JESD_HPS_Config",
++     "I2C_10B_ADDRESS",
++     "I2C_CTRL",
++     "I2C_BUSY",
++diff --git a/python/hololink/hololink.cpp b/python/hololink/hololink.cpp
++index 0c0df54..faaadcd 100644
++--- a/python/hololink/hololink.cpp
+++++ b/python/hololink/hololink.cpp
++@@ -21,6 +21,7 @@
++ #include <hololink/core/data_channel.hpp>
++ #include <hololink/core/enumerator.hpp>
++ #include <hololink/core/jesd.hpp>
+++#include <hololink/core/htk_jesd.hpp>
++ #include <hololink/core/logging_internal.hpp>
++ #include <hololink/core/named_lock.hpp>
++ #include <hololink/core/nvtx_trace.hpp>
++@@ -727,6 +728,12 @@ PYBIND11_MODULE(_hololink, m)
++         .def("apply", &AD9986Config::apply)
++         .def("verify_link_status", &AD9986Config::verify_link_status);
++ 
+++    py::class_<HTK_JESD_HPS_Config, std::shared_ptr<HTK_JESD_HPS_Config>>(m, "HTK_JESD_HPS_Config")
+++        .def(py::init<Hololink&>(), "hololink"_a)
+++        .def("host_pause_mapping", &HTK_JESD_HPS_Config::host_pause_mapping, "mask"_a)
+++        .def("apply", &HTK_JESD_HPS_Config::apply)
+++        .def("verify_link_status", &HTK_JESD_HPS_Config::verify_link_status);
+++
++     py::class_<core::NvtxTrace, std::shared_ptr<core::NvtxTrace>>(m, "NvtxTrace")
++         .def_static("setThreadName", &core::NvtxTrace::setThreadName, "threadName"_a)
++         .def_static("event_u64", &core::NvtxTrace::event_u64, "message"_a, "datum"_a);
++diff --git a/src/hololink/core/CMakeLists.txt b/src/hololink/core/CMakeLists.txt
++index cee604c..47a3a20 100644
++--- a/src/hololink/core/CMakeLists.txt
+++++ b/src/hololink/core/CMakeLists.txt
++@@ -21,6 +21,7 @@ add_library(hololink_core STATIC
++   enumerator.cpp
++   hololink.cpp
++   jesd.cpp
+++  htk_jesd.cpp
++   logging.cpp
++   metadata.cpp
++   networking.cpp
++@@ -65,6 +66,7 @@ install(FILES
++         enumerator.hpp
++         hololink.hpp
++         jesd.hpp
+++        htk_jesd.hpp
++         logging.hpp
++         # Note that logging_internal.hpp is not included in the public release.
++         # logging_internal.hpp
++diff --git a/src/hololink/core/enumerator.cpp b/src/hololink/core/enumerator.cpp
++index a43bfa1..facc679 100644
++--- a/src/hololink/core/enumerator.cpp
+++++ b/src/hololink/core/enumerator.cpp
++@@ -700,6 +700,24 @@ void Enumerator::configure_default_enumeration_strategies()
++         microchip_polarfire_total_sensors, microchip_polarfire_total_dataplanes, microchip_polarfire_sifs_per_sensor);
++     (*strategies)[MICROCHIP_POLARFIRE_UUID] = microchip_polarfire_enumeration_strategy;
++ 
+++    Metadata htk_metadata_2ch;
+++    htk_metadata_2ch["board_description"] = "Hitek Systems AGSOM5u 2ADC-2DAC";
+++    unsigned htk_total_sensors = 4; // 2DAC & 2ADC
+++    unsigned htk_total_dataplanes = 1;
+++    unsigned htk_sifs_per_sensor = 1;
+++    auto htk_agsom5u_2ch_enumeration_strategy = std::make_shared<BasicEnumerationStrategy>(htk_metadata_2ch,
+++        htk_total_sensors, htk_total_dataplanes, htk_sifs_per_sensor);
+++    (*strategies)[HTK_UUID_AG5_2CH_BUILD] = htk_agsom5u_2ch_enumeration_strategy;
+++
+++    Metadata htk_metadata_4ch;
+++    htk_metadata_4ch["board_description"] = "Hitek Systems AGSOM5u 4ADC-4DAC";
+++    htk_total_sensors = 8; // 4DAC & 4ADC
+++    htk_total_dataplanes = 1;
+++    htk_sifs_per_sensor = 1;
+++    auto htk_agsom5u_4ch_enumeration_strategy = std::make_shared<BasicEnumerationStrategy>(htk_metadata_4ch,
+++        htk_total_sensors, htk_total_dataplanes, htk_sifs_per_sensor);
+++    (*strategies)[HTK_UUID_AG5_4CH_BUILD] = htk_agsom5u_4ch_enumeration_strategy;
+++
++     auto leopard_eagle_enumeration_strategy = std::make_shared<LeopardEagleEnumerationStrategy>();
++     (*strategies)[LEOPARD_EAGLE_UUID] = leopard_eagle_enumeration_strategy;
++ 
++diff --git a/src/hololink/core/enumerator.hpp b/src/hololink/core/enumerator.hpp
++index b02f9de..487f0ee 100644
++--- a/src/hololink/core/enumerator.hpp
+++++ b/src/hololink/core/enumerator.hpp
++@@ -44,6 +44,8 @@ const std::string HOLOLINK_NANO_UUID = "d0f015e0-93b6-4473-b7d1-7dbd01cbeab5";
++ const std::string HOLOLINK_100G_UUID = "7a377bf7-76cb-4756-a4c5-7dddaed8354b";
++ const std::string MICROCHIP_POLARFIRE_UUID = "ed6a9292-debf-40ac-b603-a24e025309c1";
++ const std::string LEOPARD_EAGLE_UUID = "f1627640-b4dc-48af-a360-c55b09b3d230";
+++const std::string HTK_UUID_AG5_2CH_BUILD = "187b51fc-1aae-425b-9af8-eafa41ef08ba";
+++const std::string HTK_UUID_AG5_4CH_BUILD = "c6d5cfce-4135-4cf8-aa89-e63b0c5815ce";
++ 
++ /**
++  * Strategy that adjusts enumeration data based on FPGA UUID.
++diff --git a/src/hololink/core/htk_jesd.cpp b/src/hololink/core/htk_jesd.cpp
++new file mode 100644
++index 0000000..c969bbf
++--- /dev/null
+++++ b/src/hololink/core/htk_jesd.cpp
++@@ -0,0 +1,182 @@
+++/**
+++ * SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+++ * SPDX-License-Identifier: Apache-2.0
+++ *
+++ * Licensed under the Apache License, Version 2.0 (the "License");
+++ * you may not use this file except in compliance with the License.
+++ * You may obtain a copy of the License at
+++ *
+++ * http://www.apache.org/licenses/LICENSE-2.0
+++ *
+++ * Unless required by applicable law or agreed to in writing, software
+++ * distributed under the License is distributed on an "AS IS" BASIS,
+++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+++ * See the License for the specific language governing permissions and
+++ * limitations under the License.
+++ */
+++
+++#include "htk_jesd.hpp"
+++#include "logging_internal.hpp"
+++
+++#include <arpa/inet.h>
+++#include <netinet/in.h>
+++#include <sys/socket.h>
+++
+++namespace hololink {
+++
+++static constexpr uint32_t HOLOSCAN_USER_BASE_ADDR = 0x10000000;
+++static constexpr uint32_t HTK_JESD_LINK_BASE_ADDR = HOLOSCAN_USER_BASE_ADDR + 0x0000D000;
+++
+++static constexpr uint32_t HTK_JESD_LINK_COM_STS_OFFSET = (0x44);
+++static constexpr uint32_t HTK_JESD_LINK_TX_STS_OFFSET = (0x54);
+++static constexpr uint32_t HTK_JESD_LINK_RX_STS_OFFSET = (0x64);
+++
+++
+++HTK_JESD_HPS_Config::HTK_JESD_HPS_Config(Hololink& hololink)
+++    : hololink_(hololink)
+++    , jesd_configured_(false)
+++{
+++}
+++
+++void HTK_JESD_HPS_Config::apply(void)
+++{
+++    // manual jesd config for demo
+++    // config only nvidia IP and not jesd
+++    configure();
+++    run();
+++
+++    while (!jesd_configured_.load(std::memory_order_relaxed)) {
+++        HSB_LOG_INFO("Waiting for JESD configuration to complete...");
+++        std::this_thread::sleep_for(std::chrono::seconds(1));
+++    }
+++    HSB_LOG_INFO("JESD configuration complete");
+++}
+++
+++void HTK_JESD_HPS_Config::host_pause_mapping(uint32_t mask)
+++{
+++    host_pause_mapping_mask_ = mask;
+++}
+++
+++void HTK_JESD_HPS_Config::power_on()
+++{
+++  // performed by hps
+++}
+++
+++void HTK_JESD_HPS_Config::setup_clocks()
+++{
+++  // performed by hps
+++}
+++
+++void HTK_JESD_HPS_Config::configure()
+++{
+++    HSB_LOG_INFO("JESD::configure");
+++
+++    // Packetizer Programming
+++    hololink_.write_uint32(0x0100000C, 0x10000001);
+++    hololink_.write_uint32(0x01000004, 0x00000000);
+++    hololink_.write_uint32(0x01000008, 0xFFFFFFFF);
+++    hololink_.write_uint32(0x01000004, 0x00000070);
+++    hololink_.write_uint32(0x01000008, 0x00000001);
+++
+++    //Sensor reset off
+++    hololink_.write_uint32(0x00000008, 0x0000000F);
+++
+++    // Map Pause to ethernet interface
+++    hololink_.write_uint32(0x0120000C, host_pause_mapping_mask_);
+++
+++}
+++
+++void HTK_JESD_HPS_Config::run()
+++{
+++    HSB_LOG_INFO("JESD::run");
+++
+++    hololink_.write_uint32(0x01200000, 0x3); // Enable TX
+++
+++    jesd_configured_.store(true, std::memory_order_release);
+++}
+++
+++bool HTK_JESD_HPS_Config::task_refclk_sw(uint32_t channel, uint32_t refclk, uint32_t hwseq)
+++{
+++    // performed by hps
+++    return true;
+++}
+++
+++bool HTK_JESD_HPS_Config::task_set_pma_attribute(uint32_t channel, uint32_t code, uint32_t data)
+++{
+++    // performed by hps
+++    return true;
+++}
+++
+++void HTK_JESD_HPS_Config::task_pma_analog_reset(uint32_t channel)
+++{
+++      // performed by hps
+++
+++}
+++
+++void HTK_JESD_HPS_Config::configure_nvda_jesd_tx(void)
+++{
+++      // performed by hps
+++}
+++
+++void HTK_JESD_HPS_Config::configure_nvda_jesd_rx(void)
+++{
+++      // performed by hps
+++}
+++
+++bool HTK_JESD_HPS_Config::verify_link_status()
+++{
+++    uint32_t offset;
+++    uint32_t status;
+++    bool ok = true;
+++
+++
+++    offset = HTK_JESD_LINK_BASE_ADDR + HTK_JESD_LINK_COM_STS_OFFSET;
+++    status = hololink_.read_uint32(offset);
+++
+++    if (status & 0x1) {
+++      HSB_LOG_INFO("JESD204 Core PLL lock Status: {:#x}", status & 0x1);
+++    }
+++    else {
+++      ok &= false;
+++      HSB_LOG_ERROR("JESD204 Core PLL lock Status: {:#x}", status & 0x1);
+++    }
+++
+++    if (status & 0x10) {
+++      HSB_LOG_INFO("JESD204 Sys PLL lock Status: {:#x}", status & 0x10);
+++    }
+++    else {
+++      ok &= false;
+++      HSB_LOG_ERROR("JESD204 Sys PLL lock Status: {:#x}", status & 0x10);
+++    }
+++
+++
+++    offset = HTK_JESD_LINK_BASE_ADDR + HTK_JESD_LINK_TX_STS_OFFSET;
+++    status = hololink_.read_uint32(offset);
+++
+++    if (status & 0x1) {
+++      HSB_LOG_INFO("JESD204 TX DAC Link Status: {:#x}", status & 0x1);
+++    }
+++    else {
+++      ok &= false;
+++      HSB_LOG_ERROR("JESD204 TX DAC Link Status: {:#x}", status & 0x1);
+++    }
+++
+++    offset = HTK_JESD_LINK_BASE_ADDR + HTK_JESD_LINK_RX_STS_OFFSET;
+++    status = hololink_.read_uint32(offset);
+++
+++    if (status & 0x1) {
+++      HSB_LOG_INFO("JESD204 RX ADC Link Status: {:#x}", status & 0x1);
+++    }
+++    else {
+++      ok &= false;
+++      HSB_LOG_ERROR("JESD204 RX ADC Link Status: {:#x}", status & 0x1);
+++    }
+++
+++    if (ok) {
+++        HSB_LOG_INFO("JESD link status: OK");
+++    }
+++
+++    return ok;
+++}
+++
+++} // namespace hololink
++diff --git a/src/hololink/core/htk_jesd.hpp b/src/hololink/core/htk_jesd.hpp
++new file mode 100644
++index 0000000..2e650b6
++--- /dev/null
+++++ b/src/hololink/core/htk_jesd.hpp
++@@ -0,0 +1,70 @@
+++/**
+++ * SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+++ * SPDX-License-Identifier: Apache-2.0
+++ *
+++ * Licensed under the Apache License, Version 2.0 (the "License");
+++ * you may not use this file except in compliance with the License.
+++ * You may obtain a copy of the License at
+++ *
+++ * http://www.apache.org/licenses/LICENSE-2.0
+++ *
+++ * Unless required by applicable law or agreed to in writing, software
+++ * distributed under the License is distributed on an "AS IS" BASIS,
+++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+++ * See the License for the specific language governing permissions and
+++ * limitations under the License.
+++ */
+++
+++#pragma once
+++
+++#include <atomic>
+++#include <cstdint>
+++#include <thread>
+++
+++#include "hololink.hpp"
+++#include "jesd.hpp"
+++
+++namespace hololink {
+++
+++/**
+++ * in hitek sys esom5u, the jesd config will be performed by ARM HPS in Agilex5 SOC FPGA.
+++ * therefore removing the SPI config
+++ */
+++class HTK_JESD_HPS_Config : public JESDConfig {
+++public:
+++    explicit HTK_JESD_HPS_Config(Hololink& hololink);
+++
+++    // Set the host pause mapping for the AD9986.
+++    // 0x01: Interface 0
+++    // 0x02: Interface 1
+++    void host_pause_mapping(uint32_t mask);
+++
+++    // Applies the current configuration.
+++    void apply();
+++
+++    // Returns true if the JESD link is healthy:
+++    // - AD9082 link status == 0x60 (JESD204_LINK_STATUS_DATA)
+++    // - No FPGA RX lane 64B66B errors
+++    // - No UPHY overflow
+++    bool verify_link_status();
+++
+++    // JESDConfig functions.
+++    virtual void power_on();
+++    virtual void setup_clocks();
+++    virtual void configure();
+++    virtual void run();
+++
+++private:
+++    Hololink& hololink_;
+++    std::atomic<bool> jesd_configured_;
+++
+++    bool task_refclk_sw(uint32_t channel, uint32_t refclk, uint32_t hwseq);
+++    bool task_set_pma_attribute(uint32_t channel, uint32_t code, uint32_t data);
+++    void task_pma_analog_reset(uint32_t channel);
+++    void configure_nvda_jesd_tx(void);
+++    void configure_nvda_jesd_rx(void);
+++
+++    uint32_t host_pause_mapping_mask_ = 0;
+++};
+++
+++} // namespace hololink
+diff --git a/applications/hermes2host/cpp/kernels.cu b/applications/hermes2host/cpp/kernels.cu
+new file mode 100644
+index 000000000..c74c79075
+--- /dev/null
++++ b/applications/hermes2host/cpp/kernels.cu
+@@ -0,0 +1,29 @@
++/*
++ * SPDX-FileCopyrightText: Copyright (c) 2025-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
++ * SPDX-License-Identifier: Apache-2.0
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ * http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#include "kernels.cuh"
++
++__global__ void dummy_packet_reorder_kernel() {}
++
++void dummy_packet_reorder(void* out, const void* const* in, uint16_t pkt_len, uint32_t num_pkts,
++                          cudaStream_t stream) {
++  (void)out;
++  (void)in;
++  (void)pkt_len;
++  (void)num_pkts;
++  dummy_packet_reorder_kernel<<<1, 1, 0, stream>>>();
++}
+diff --git a/applications/hermes2host/cpp/kernels.cuh b/applications/hermes2host/cpp/kernels.cuh
+new file mode 100644
+index 000000000..625c5b9a2
+--- /dev/null
++++ b/applications/hermes2host/cpp/kernels.cuh
+@@ -0,0 +1,24 @@
++/*
++ * SPDX-FileCopyrightText: Copyright (c) 2025-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
++ * SPDX-License-Identifier: Apache-2.0
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ * http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#pragma once
++
++#include <cuda.h>
++#include <cuda_runtime.h>
++
++void dummy_packet_reorder(void* out, const void* const* in, uint16_t pkt_len, uint32_t num_pkts,
++                          cudaStream_t stream);
+diff --git a/applications/hermes2host/cpp/main.cpp b/applications/hermes2host/cpp/main.cpp
+new file mode 100644
+index 000000000..5431c517b
+--- /dev/null
++++ b/applications/hermes2host/cpp/main.cpp
+@@ -0,0 +1,538 @@
++/*
++ * SPDX-FileCopyrightText: Copyright (c) 2025-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
++ * SPDX-License-Identifier: Apache-2.0
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ * http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++/*
++ * hermes2host
++ *
++ * Receive high-rate IQ data from a Holoscan Sensor Bridge (HSB) FPGA using
++ * DAQIRI DPDK, compute windowed FFT magnitude on GPU, and display the
++ * spectrum in real-time via Holoviz.
++ *
++ * Pipeline:
++ *   HermesRxOp ──→ SpectralOp ──→ HolovizOp
++ *   (DPDK RX,       (window, FFT,    (line plot per antenna)
++ *    raw IQ out)     averaging,
++ *        │           magnitude)
++ *        │
++ *        └──→ DDCOp (placeholder: narrowband extraction for ML)
++ *
++ * CLI Usage:
++ *   ./hermes2host <config.yaml> --sr <MHz> --center-freq <MHz> [options]
++ *
++ *   Required:
++ *     --sr MHz            Sample rate in MHz (e.g., 245.76, 750)
++ *     --center-freq MHz   Center frequency in MHz (e.g., 3500, 1500)
++ *
++ *   Options:
++ *     --fft-size N        FFT size, power of 2, 512-1048576 (default: 65536)
++ *     --num-averages N    FFTs to average, power of 2, 1-32 (default: 1)
++ *     --freq-min MHz      Display min frequency (default: center - sr/2)
++ *     --freq-max MHz      Display max frequency (default: center + sr/2)
++ *     --hololink IP       Override FPGA IP from YAML (default: hsb.hololink_ip)
++ *     -h, --help          Show usage
++ *
++ *   Examples:
++ *     ./hermes2host hermes2host.yaml --sr 245.76 --center-freq 3500 \
++ *         --fft-size 65536 --num-averages 8
++ *
++ *     ./hermes2host hermes2host.yaml --sr 750 --center-freq 1500 \
++ *         --fft-size 65536 --num-averages 8 --freq-min 350 --freq-max 1050
++ *
++ * YAML Configuration (hsb section):
++ *   payload_size        FPGA payload bytes per packet (from pcap RETH DMA_len)
++ *   mtu                 Max per-packet payload for Holoscan IP (default: 1500,
++ *                       must be >= payload_size, hardware max: 4096)
++ *   custom_header_size  Bytes before IQ data in payload (0 if pure IQ)
++ *   data_port           UDP destination port (must match daqiri flow udp_dst)
++ *   hololink_ip         FPGA data-plane IP address
++ *
++ * Computed values (logged at startup, derived from YAML):
++ *   max_packet_size     = 70 + payload_size + 4 (total Ethernet frame)
++ *   header_size         = 70 + custom_header_size (offset to IQ data)
++ *   samples_per_antenna = (payload_size - custom_header_size) / (num_antennas * 4)
++ *   pkt_pages           = ceil(min(mtu, payload_size) / 128)
++ *
++ * MTU and DP_PACKET_SIZE:
++ *   The FPGA's DP_PACKET_SIZE register (HIF offset 0x04) controls the max
++ *   payload per RoCE packet in 128-byte pages. The hololink library reads
++ *   "mtu" from enumeration metadata in configure_common() to compute this.
++ *   We inject hsb.mtu into channel_metadata BEFORE DataChannel construction
++ *   so configure_roce() programs the correct value on the first VP_MASK enable.
++ *   The hardware latches DP_PACKET_SIZE on the VP_MASK rising edge and does
++ *   NOT re-read it on subsequent enables — post-hoc overrides have no effect.
++ *   Always set mtu >= payload_size to avoid fragmentation.
++ */
++
++#include "hermes2host_rx_op.h"
++#include "spectral_op.h"
++#include "ddc_op.h"
++
++#include <holoscan/holoscan.hpp>
++#include <holoscan/operators/holoviz/holoviz.hpp>
++#include <daqiri/daqiri.h>
++
++#include <cuda.h>
++#include <yaml-cpp/yaml.h>
++
++#include <hololink/core/data_channel.hpp>
++#include <hololink/core/enumerator.hpp>
++#include <hololink/core/hololink.hpp>
++#include <hololink/core/jesd.hpp>
++#include <hololink/core/htk_jesd.hpp>
++
++#include <filesystem>
++#include <getopt.h>
++#include <iostream>
++#include <sstream>
++#include <string>
++
++#define CudaCheck(FUNC)                                                         \
++    {                                                                           \
++        const CUresult result = FUNC;                                           \
++        if (result != CUDA_SUCCESS) {                                           \
++            const char* error_name = "";                                        \
++            cuGetErrorName(result, &error_name);                                \
++            const char* error_string = "";                                      \
++            cuGetErrorString(result, &error_string);                            \
++            std::stringstream buf;                                              \
++            buf << "[" << __FILE__ << ":" << __LINE__ << "] CUDA driver error " \
++                << result << " (" << error_name << "): " << error_string;       \
++            throw std::runtime_error(buf.str().c_str());                        \
++        }                                                                       \
++    }
++
++struct AppConfig {
++  double sr_mhz = 0;
++  double center_freq_mhz = 0;
++  int fft_size = 65536;
++  int num_antennas = 1;
++  int num_averages = 1;
++  float db_min = -120.0f;
++  float db_max = 0.0f;
++  double freq_min_mhz = 0;
++  double freq_max_mhz = 0;
++  int iq_swap = 1;
++
++  // Computed from hsb.payload_size, hsb.custom_header_size, num_antennas
++  uint16_t max_packet_size = 1482;
++  uint16_t header_size = 70;
++  int samples_per_antenna = 128;
++
++  // Integer-MHz frequency ticks for the display grid (computed once, capped at 11)
++  std::vector<double> tick_freqs_mhz;   // actual MHz values for labels
++  std::vector<float>  tick_x_norm;      // normalized [0,1] x-positions for grid lines
++};
++
++class App : public holoscan::Application {
++ public:
++  explicit App(const AppConfig& cfg) : cfg_(cfg) {}
++
++  void compose() override {
++    using namespace holoscan;
++
++    scheduler(make_scheduler<MultiThreadScheduler>("multithread-scheduler",
++                                                   from_config("scheduler")));
++
++    const auto [rx_en, tx_en] = daqiri::get_rx_tx_configs_enabled(config());
++    if (!rx_en) {
++      HOLOSCAN_LOG_ERROR("No RX interface configured in YAML");
++      exit(1);
++    }
++
++    // =========================================================================
++    // Operators
++    // =========================================================================
++
++    auto rx = make_operator<ops::HermesRxOp>(
++        "hermes_rx",
++        from_config("hermes_rx"),
++        Arg("fft_size", cfg_.fft_size),
++        Arg("num_antennas", cfg_.num_antennas),
++        Arg("max_packet_size", cfg_.max_packet_size),
++        Arg("header_size", cfg_.header_size),
++        Arg("samples_per_antenna", cfg_.samples_per_antenna),
++        make_condition<BooleanCondition>("is_alive", true));
++
++    // Compute display bin range from frequency zoom settings.
++    double full_bw = cfg_.sr_mhz;
++    double f_low = cfg_.center_freq_mhz - full_bw / 2.0;
++    int bin_start = static_cast<int>((cfg_.freq_min_mhz - f_low) / full_bw * cfg_.fft_size);
++    int bin_end = static_cast<int>((cfg_.freq_max_mhz - f_low) / full_bw * cfg_.fft_size);
++    if (bin_start < 0) bin_start = 0;
++    if (bin_end > cfg_.fft_size) bin_end = cfg_.fft_size;
++
++    auto spectral = make_operator<ops::SpectralOp>(
++        "spectral",
++        from_config("spectral"),
++        Arg("num_averages", cfg_.num_averages),
++        Arg("fft_size", cfg_.fft_size),
++        Arg("num_antennas", cfg_.num_antennas),
++        Arg("bin_start", bin_start),
++        Arg("bin_end", bin_end),
++        Arg("freq_tick_positions", cfg_.tick_x_norm));
++
++    auto ddc = make_operator<ops::DDCOp>(
++        "ddc",
++        from_config("ddc"));
++
++    // --- Holoviz display configuration ---
++    auto input_specs = buildGridSpecs();
++
++    // Antenna spectrum lines
++    std::vector<std::vector<float>> colors = {
++        {0.0f, 1.0f, 0.0f, 1.0f},   // antenna 0: green
++        {0.0f, 1.0f, 1.0f, 1.0f},   // antenna 1: cyan
++        {1.0f, 0.0f, 0.0f, 1.0f},   // antenna 2: red
++        {1.0f, 1.0f, 0.0f, 1.0f},   // antenna 3: yellow
++    };
++    for (int a = 0; a < cfg_.num_antennas; a++) {
++      std::string name = "antenna_" + std::to_string(a);
++      ops::HolovizOp::InputSpec spec(name, ops::HolovizOp::InputType::LINE_STRIP);
++      spec.color_ = colors[a % colors.size()];
++      spec.line_width_ = 2.0f;
++      input_specs.push_back(spec);
++    }
++
++    // Window title
++    double disp_bw = cfg_.freq_max_mhz - cfg_.freq_min_mhz;
++    char title[512];
++    snprintf(title, sizeof(title),
++             "Hermes Spectrum | %.2f to %.2f MHz | BW=%.2f MHz | avg=%d",
++             cfg_.freq_min_mhz, cfg_.freq_max_mhz, disp_bw, cfg_.num_averages);
++
++    auto viz = make_operator<ops::HolovizOp>(
++        "holoviz",
++        Arg("tensors", input_specs),
++        Arg("window_title", std::string(title)),
++        Arg("width", static_cast<uint32_t>(1920)),
++        Arg("height", static_cast<uint32_t>(1080)));
++
++    // =========================================================================
++    // Pipeline wiring
++    // =========================================================================
++    add_flow(rx, spectral, {{"iq_out", "iq_in"}});
++    add_flow(spectral, viz, {{"out", "receivers"}});
++
++    // DDCOp is a placeholder — don't wire it into the pipeline until it has
++    // a real consumer, otherwise it back-pressures iq_out and kills the pipeline.
++    // Future: add_flow(rx, ddc, {{"iq_out", "iq_in"}});
++    // Future: add_flow(ddc, ml_inference, {{"iq_out", "iq_in"}});
++  }
++
++ private:
++  using InputSpec = holoscan::ops::HolovizOp::InputSpec;
++  using InputType = holoscan::ops::HolovizOp::InputType;
++
++  std::vector<InputSpec> buildGridSpecs() {
++    std::vector<InputSpec> specs;
++    constexpr int NUM_DB_TICKS = 10;
++
++    // --- dB axis (horizontal lines + labels) ---
++    InputSpec db_lines("db_ticks", InputType::LINES);
++    db_lines.color_ = {1.0f, 1.0f, 0.0f, 0.2f};
++    db_lines.line_width_ = 1.0f;
++    specs.push_back(db_lines);
++
++    float db_range = cfg_.db_max - cfg_.db_min;
++    for (int t = 0; t < NUM_DB_TICKS; t++) {
++      float frac = static_cast<float>(t + 1) / static_cast<float>(NUM_DB_TICKS + 1);
++      float db_val = cfg_.db_max - frac * db_range;
++      char name[64], text[32];
++      snprintf(name, sizeof(name), "db_label_%d", t);
++      snprintf(text, sizeof(text), "%.0f dBFS", db_val);
++
++      InputSpec label(name, InputType::TEXT);
++      label.color_ = {1.0f, 1.0f, 0.0f, 0.8f};
++      label.text_ = {std::string(text)};
++      specs.push_back(label);
++    }
++
++    // --- Frequency axis (vertical lines + labels at integer MHz) ---
++    InputSpec freq_lines("freq_ticks", InputType::LINES);
++    freq_lines.color_ = {1.0f, 1.0f, 1.0f, 0.3f};
++    freq_lines.line_width_ = 1.0f;
++    specs.push_back(freq_lines);
++
++    for (size_t t = 0; t < cfg_.tick_freqs_mhz.size(); t++) {
++      char name[64], text[32];
++      snprintf(name, sizeof(name), "label_%zu", t);
++      snprintf(text, sizeof(text), "%.0f", cfg_.tick_freqs_mhz[t]);
++
++      InputSpec label(name, InputType::TEXT);
++      label.color_ = {1.0f, 1.0f, 1.0f, 0.9f};
++      label.text_ = {std::string(text)};
++      specs.push_back(label);
++    }
++
++    return specs;
++  }
++
++  AppConfig cfg_;
++};
++
++void print_usage(const char* prog)
++{
++    std::cout << "Usage: " << prog << " <config.yaml> --sr <MHz> --center-freq <MHz> [options]\n"
++              << "Receive HSB FPGA IQ data, compute FFT, display spectrum.\n\n"
++              << "Required:\n"
++              << "  --sr MHz            Sample rate in MHz\n"
++              << "  --center-freq MHz   Center frequency in MHz\n\n"
++              << "Options:\n"
++              << "  --fft-size N        FFT size (power of 2, 512-1048576, default: 65536)\n"
++              << "  --num-averages N    FFTs to average (power of 2, 1-32, default: 1)\n"
++              << "  --freq-min MHz      Display minimum frequency (default: center - sr/2)\n"
++              << "  --freq-max MHz      Display maximum frequency (default: center + sr/2)\n"
++              << "  --hololink IP       HSB data-plane IP (default: from YAML)\n"
++              << "  -h, --help          Show this help\n";
++}
++
++bool is_power_of_2(int n) { return n > 0 && (n & (n - 1)) == 0; }
++
++int main(int argc, char** argv) {
++  std::string hololink_ip_override;
++  AppConfig cfg;
++  bool sr_set = false;
++  bool cf_set = false;
++
++  const struct option long_options[] = {
++      {"help", no_argument, nullptr, 'h'},
++      {"hololink", required_argument, nullptr, 0},
++      {"sr", required_argument, nullptr, 0},
++      {"center-freq", required_argument, nullptr, 0},
++      {"fft-size", required_argument, nullptr, 0},
++      {"num-averages", required_argument, nullptr, 0},
++      {"freq-min", required_argument, nullptr, 0},
++      {"freq-max", required_argument, nullptr, 0},
++      {0, 0, nullptr, 0}};
++
++  while (true) {
++    int option_index = 0;
++    const int c = getopt_long(argc, argv, "h", long_options, &option_index);
++    if (c == -1) break;
++    if (c == 0) {
++      std::string name = long_options[option_index].name;
++      if (name == "hololink") {
++        hololink_ip_override = optarg;
++      } else if (name == "sr") {
++        cfg.sr_mhz = std::stod(optarg);
++        sr_set = true;
++      } else if (name == "center-freq") {
++        cfg.center_freq_mhz = std::stod(optarg);
++        cf_set = true;
++      } else if (name == "fft-size") {
++        cfg.fft_size = std::stoi(optarg);
++      } else if (name == "num-averages") {
++        cfg.num_averages = std::stoi(optarg);
++      } else if (name == "freq-min") {
++        cfg.freq_min_mhz = std::stod(optarg);
++      } else if (name == "freq-max") {
++        cfg.freq_max_mhz = std::stod(optarg);
++      }
++    } else if (c == 'h') {
++      print_usage(argv[0]);
++      return 0;
++    }
++  }
++
++  if (!sr_set || !cf_set) {
++    HOLOSCAN_LOG_ERROR("--sr and --center-freq are required");
++    print_usage(argv[0]);
++    return 1;
++  }
++
++  if (!is_power_of_2(cfg.fft_size) || cfg.fft_size < 512 || cfg.fft_size > 1048576) {
++    HOLOSCAN_LOG_ERROR("--fft-size must be a power of 2 between 512 and 1048576");
++    return 1;
++  }
++
++  if (cfg.num_averages < 1 || cfg.num_averages > 32 || !is_power_of_2(cfg.num_averages)) {
++    HOLOSCAN_LOG_ERROR("--num-averages must be a power of 2 between 1 and 32");
++    return 1;
++  }
++
++  // Default frequency display range to full Nyquist band
++  if (cfg.freq_min_mhz == 0 && cfg.freq_max_mhz == 0) {
++    cfg.freq_min_mhz = cfg.center_freq_mhz - cfg.sr_mhz / 2.0;
++    cfg.freq_max_mhz = cfg.center_freq_mhz + cfg.sr_mhz / 2.0;
++  }
++
++  // Compute display bin range (same formula as compose() for tick alignment).
++  double full_bw = cfg.sr_mhz;
++  double f_low = cfg.center_freq_mhz - full_bw / 2.0;
++  int bin_start = static_cast<int>((cfg.freq_min_mhz - f_low) / full_bw * cfg.fft_size);
++  int bin_end = static_cast<int>((cfg.freq_max_mhz - f_low) / full_bw * cfg.fft_size);
++  if (bin_start < 0) bin_start = 0;
++  if (bin_end > cfg.fft_size) bin_end = cfg.fft_size;
++  int num_bins = bin_end - bin_start;
++
++  // Compute integer-MHz frequency ticks, capped at 11.
++  // Pick the smallest step (1, 2, 5, 10, 20, 50 ...) that yields <= 11 ticks.
++  {
++    constexpr int MAX_TICKS = 11;
++    // candidate steps in MHz
++    const double steps[] = {1, 2, 5, 10, 20, 25, 50, 100, 200, 250, 500, 1000};
++    double step = steps[0];
++    for (double s : steps) {
++      step = s;
++      int count = static_cast<int>(std::floor(cfg.freq_max_mhz / s) -
++                                   std::ceil(cfg.freq_min_mhz / s)) + 1;
++      if (count <= MAX_TICKS) break;
++    }
++    double first = std::ceil(cfg.freq_min_mhz / step) * step;
++    for (double f = first; f <= cfg.freq_max_mhz + 1e-9; f += step) {
++      // Compute tick x-position using the same bin math as the CUDA kernel
++      double bin_frac = (f - f_low) / full_bw * cfg.fft_size - bin_start;
++      float x_norm = static_cast<float>(bin_frac / (num_bins - 1));
++      cfg.tick_freqs_mhz.push_back(f);
++      cfg.tick_x_norm.push_back(x_norm);
++    }
++  }
++
++  if (optind >= argc) {
++    HOLOSCAN_LOG_ERROR("Usage: {} <config.yaml> --sr <MHz> --center-freq <MHz>", argv[0]);
++    return 1;
++  }
++
++  std::filesystem::path config_path(argv[optind]);
++  if (!config_path.is_absolute()) {
++    config_path = std::filesystem::canonical(argv[0]).parent_path() / config_path;
++  }
++
++  // -------------------------------------------------------------------------
++  // Load FPGA configuration from YAML
++  // -------------------------------------------------------------------------
++  YAML::Node yaml = YAML::LoadFile(config_path.string());
++  const auto hsb_cfg = yaml["hsb"];
++  if (!hsb_cfg) {
++    HOLOSCAN_LOG_ERROR("Missing 'hsb' section in YAML config");
++    return 1;
++  }
++
++  const std::string hololink_ip = hololink_ip_override.empty()
++      ? hsb_cfg["hololink_ip"].as<std::string>("192.168.0.2")
++      : hololink_ip_override;
++  const size_t frame_size = hsb_cfg["payload_size"].as<size_t>();
++  const uint32_t mtu = hsb_cfg["mtu"].as<uint32_t>(1500);
++  const uint32_t data_port = hsb_cfg["data_port"].as<uint32_t>();
++  const uint32_t custom_header_size = hsb_cfg["custom_header_size"].as<uint32_t>(0);
++
++  // Compute derived RX operator parameters from hsb config
++  constexpr uint32_t ROCE_HEADER_SIZE = 70;  // Eth(14)+IP(20)+UDP(8)+BTH(12)+RETH(16)
++  constexpr uint32_t ICRC_SIZE = 4;
++  const uint16_t max_packet_size = static_cast<uint16_t>(ROCE_HEADER_SIZE + frame_size + ICRC_SIZE);
++  const uint16_t header_size = static_cast<uint16_t>(ROCE_HEADER_SIZE + custom_header_size);
++
++  cfg.num_antennas = yaml["hermes_rx"]["num_antennas"].as<int>(1);
++  cfg.max_packet_size = max_packet_size;
++  cfg.header_size = header_size;
++  cfg.samples_per_antenna = static_cast<int>((frame_size - custom_header_size) / (cfg.num_antennas * 4));
++
++  HOLOSCAN_LOG_INFO("HSB config: payload_size={} mtu={} custom_header_size={} data_port={} num_antennas={}",
++                    frame_size, mtu, custom_header_size, data_port, cfg.num_antennas);
++  HOLOSCAN_LOG_INFO("Computed RX params: max_packet_size={} header_size={} samples_per_antenna={} nom_payload_size={}",
++                    cfg.max_packet_size, cfg.header_size, cfg.samples_per_antenna,
++                    cfg.max_packet_size - cfg.header_size);
++
++  cfg.iq_swap = yaml["spectral"]["iq_swap"].as<int>(1);
++  cfg.db_min = yaml["spectral"]["db_min"].as<float>(20.0f);
++  cfg.db_max = yaml["spectral"]["db_max"].as<float>(120.0f);
++
++  constexpr size_t HOLOLINK_PAGE_SIZE = 128;
++  constexpr size_t HOLOLINK_METADATA_SIZE = 128;
++  const size_t metadata_address = ((frame_size + HOLOLINK_PAGE_SIZE - 1) / HOLOLINK_PAGE_SIZE) * HOLOLINK_PAGE_SIZE;
++  const size_t page_size = metadata_address + HOLOLINK_METADATA_SIZE;
++  const unsigned pages = 1;
++
++  double nyquist_mhz = cfg.sr_mhz / 2.0;
++  HOLOSCAN_LOG_INFO("Spectrum config: sr={:.3f} MHz, center={:.3f} MHz, Nyquist=±{:.3f} MHz, FFT={}, avg={}",
++                    cfg.sr_mhz, cfg.center_freq_mhz, nyquist_mhz, cfg.fft_size, cfg.num_averages);
++
++  // -------------------------------------------------------------------------
++  // Phase 1: Hololink FPGA bringup
++  // -------------------------------------------------------------------------
++  HOLOSCAN_LOG_INFO("Initializing CUDA...");
++  CudaCheck(cuInit(0));
++  CUdevice cu_device;
++  CudaCheck(cuDeviceGet(&cu_device, 0));
++  CUcontext cu_context;
++  CudaCheck(cuDevicePrimaryCtxRetain(&cu_context, cu_device));
++
++  HOLOSCAN_LOG_INFO("Enumerating HSB at {} ...", hololink_ip);
++  hololink::Metadata channel_metadata = hololink::Enumerator::find_channel(hololink_ip);
++  hololink::DataChannel::use_sensor(channel_metadata, 0);
++
++  hololink::Metadata overrides;
++  overrides["block_enable"] = int64_t(0);
++  overrides["mtu"] = int64_t(mtu);
++  channel_metadata.update(overrides);
++
++  hololink::DataChannel hololink_channel(channel_metadata);
++  std::shared_ptr<hololink::Hololink> hololink = hololink_channel.hololink();
++
++  HOLOSCAN_LOG_INFO("Starting hololink control plane...");
++  hololink->start();
++  HOLOSCAN_LOG_INFO("Resetting hololink...");
++  hololink->reset();
++
++  std::shared_ptr<hololink::HTK_JESD_HPS_Config> mxfe_config_;
++  mxfe_config_ = std::make_shared<hololink::HTK_JESD_HPS_Config>(*hololink);
++  mxfe_config_->host_pause_mapping(1);
++  mxfe_config_->apply();
++  // -------------------------------------------------------------------------
++  // Phase 2: DAQIRI init
++  // -------------------------------------------------------------------------
++  if (daqiri::daqiri_init(config_path.string()) != daqiri::Status::SUCCESS) {
++    HOLOSCAN_LOG_ERROR("Failed to initialize DAQIRI");
++    hololink->stop();
++    return 1;
++  }
++  HOLOSCAN_LOG_INFO("DAQIRI initialized from {}", config_path.string());
++
++  // -------------------------------------------------------------------------
++  // Phase 3: Program FPGA dataplane
++  // -------------------------------------------------------------------------
++  hololink_channel.authenticate(0, 0);
++  hololink_channel.configure_roce(0, frame_size, page_size, pages, data_port);
++
++  // MTU was injected into channel_metadata before DataChannel construction,
++  // so configure_roce() → configure_common() computes DP_PACKET_SIZE natively
++  // using our MTU value instead of the hardcoded DEFAULT_MTU (1500).
++  const uint32_t pkt_payload = std::min(mtu, static_cast<uint32_t>(frame_size));
++  const uint32_t pkt_pages = (pkt_payload + 127) / 128;
++  HOLOSCAN_LOG_INFO("FPGA dataplane programmed: port={} payload_size={} page_size={} mtu={} pkt_pages={}",
++                    data_port, frame_size, page_size, mtu, pkt_pages);
++
++  // -------------------------------------------------------------------------
++  // Phase 4: Run Holoscan pipeline
++  // -------------------------------------------------------------------------
++  auto app = holoscan::make_application<App>(cfg);
++  app->config(config_path.string());
++  app->run();
++
++  // -------------------------------------------------------------------------
++  // Phase 5: Teardown
++  // -------------------------------------------------------------------------
++  daqiri::print_stats();
++  daqiri::shutdown();
++  HOLOSCAN_LOG_INFO("DAQIRI shut down.");
++
++  hololink->stop();
++  HOLOSCAN_LOG_INFO("Hololink stopped.");
++
++  CudaCheck(cuDevicePrimaryCtxRelease(cu_device));
++  return 0;
++}
+diff --git a/applications/hermes2host/cpp/metadata.json b/applications/hermes2host/cpp/metadata.json
+new file mode 100644
+index 000000000..3fbcbe68c
+--- /dev/null
++++ b/applications/hermes2host/cpp/metadata.json
+@@ -0,0 +1,44 @@
++{
++  "application": {
++    "name": "Hermes to Host",
++    "authors": [
++      {
++        "name": "NVIDIA",
++        "affiliation": "NVIDIA"
++      }
++    ],
++    "language": "C++",
++    "version": "1.0",
++    "changelog": {
++      "1.0": "Initial HSB FPGA receive via DAQIRI DPDK"
++    },
++    "platforms": ["x86_64", "aarch64"],
++    "tags": ["Networking and Distributed Computing", "HSB", "UDP", "GPUDirect", "DPDK"],
++    "dockerfile": "pkg/holoscan-networking/Dockerfile",
++    "holoscan_sdk": {
++      "minimum_required_version": "2.6.0",
++      "tested_versions": [
++        "4.3.0"
++      ]
++    },
++    "ranking": 1,
++    "requirements": {
++      "libraries": [
++        {
++          "name": "DAQIRI",
++          "version": "0.1.0",
++          "url": "https://github.com/nvidia/daqiri"
++        },
++        {
++          "name": "hololink",
++          "version": "1.0.0",
++          "url": "https://github.com/nvidia-holoscan/holoscan-sensor-bridge"
++        }
++      ]
++    },
++    "run": {
++      "command": "<holohub_app_bin>/hermes2host hermes2host.yaml --hololink 192.168.0.2",
++      "workdir": "holohub_bin"
++    }
++  }
++}
+diff --git a/applications/hermes2host/cpp/spectral_kernels.cu b/applications/hermes2host/cpp/spectral_kernels.cu
+new file mode 100644
+index 000000000..59d5b9495
+--- /dev/null
++++ b/applications/hermes2host/cpp/spectral_kernels.cu
+@@ -0,0 +1,239 @@
++/*
++ * SPDX-FileCopyrightText: Copyright (c) 2025-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
++ * SPDX-License-Identifier: Apache-2.0
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ * http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#include "spectral_kernels.cuh"
++#include <cstdint>
++#include <math_constants.h>
++
++// ============================================================================
++// Hanning window generation
++// ============================================================================
++
++__global__ void hanning_window_kernel(float* out, int n) {
++  int i = blockIdx.x * blockDim.x + threadIdx.x;
++  if (i < n) {
++    out[i] = 0.5f * (1.0f - cosf(2.0f * CUDART_PI_F * i / (n - 1)));
++  }
++}
++
++void generate_hanning_window(float* out, int n, cudaStream_t stream) {
++  int threads = 256;
++  int blocks = (n + threads - 1) / threads;
++  hanning_window_kernel<<<blocks, threads, 0, stream>>>(out, n);
++}
++
++// ============================================================================
++// Int16 IQ → complex float with window
++// ============================================================================
++
++__global__ void window_int16_to_complex_kernel(const int16_t* in, const float* window,
++                                               cufftComplex* out, int num_samples,
++                                               int iq_swap) {
++  int i = blockIdx.x * blockDim.x + threadIdx.x;
++  if (i < num_samples) {
++    float w = window[i];
++    float first  = static_cast<float>(in[2 * i]) * w;
++    float second = static_cast<float>(in[2 * i + 1]) * w;
++    // iq_swap=0: I,Q order (conjugate Q to flip spectrum right)
++    // iq_swap=1: Q,I order
++    // iq_swap=2: I,Q with conjugate (negate Q)
++    if (iq_swap == 1) {
++      out[i].x = second;
++      out[i].y = first;
++    } else if (iq_swap == 2) {
++      out[i].x = first;
++      out[i].y = -second;
++    } else {
++      out[i].x = first;
++      out[i].y = second;
++    }
++  }
++}
++
++void apply_window_int16_to_complex(const int16_t* in, const float* window,
++                                   cufftComplex* out, int num_samples,
++                                   int iq_swap, cudaStream_t stream) {
++  int threads = 256;
++  int blocks = (num_samples + threads - 1) / threads;
++  window_int16_to_complex_kernel<<<blocks, threads, 0, stream>>>(in, window, out, num_samples, iq_swap);
++}
++
++// ============================================================================
++// Magnitude in dB with fftshift
++// ============================================================================
++
++__global__ void magnitude_db_fftshift_kernel(const cufftComplex* in, float* out, int n,
++                                             int reverse) {
++  int i = blockIdx.x * blockDim.x + threadIdx.x;
++  if (i < n) {
++    int src = reverse ? (n / 2 - i + n) % n : (i + n / 2) % n;
++    float re = in[src].x;
++    float im = in[src].y;
++    float mag_sq = re * re + im * im;
++    if (mag_sq < 1e-40f) mag_sq = 1e-40f;
++    // Normalize to dBFS: reference = (N * INT16_MAX * Hanning_coherent_gain)^2
++    float ref = (float)n * 32768.0f * 0.5f;
++    out[i] = 10.0f * log10f(mag_sq / (ref * ref));
++  }
++}
++
++void magnitude_db_fftshift(const cufftComplex* in, float* out, int n,
++                           int reverse, cudaStream_t stream) {
++  int threads = 256;
++  int blocks = (n + threads - 1) / threads;
++  magnitude_db_fftshift_kernel<<<blocks, threads, 0, stream>>>(in, out, n, reverse);
++}
++
++
++// ============================================================================
++// DC block — replace center bin(s) with neighbor average
++// ============================================================================
++
++__global__ void dc_block_kernel(float* out, int n, int dc_bins) {
++  if (dc_bins <= 0) return;
++
++  int center = n / 2;
++  int half = dc_bins / 2;
++  int lo = center - half;
++  int hi = center + half;
++  if (lo < 0) lo = 0;
++  if (hi >= n) hi = n - 1;
++
++  float left_val = (lo > 0) ? out[lo - 1] : out[hi + 1];
++  float right_val = (hi < n - 1) ? out[hi + 1] : out[lo - 1];
++  float fill = (left_val + right_val) * 0.5f;
++
++  for (int i = lo; i <= hi; i++) {
++    out[i] = fill;
++  }
++}
++
++void dc_block_magnitude(float* out, int n, int dc_bins, cudaStream_t stream) {
++  dc_block_kernel<<<1, 1, 0, stream>>>(out, n, dc_bins);
++}
++
++// ============================================================================
++// Normalize to [0,1] coordinate pairs for Holoviz line plot
++// ============================================================================
++
++__global__ void normalize_to_coords_kernel(const float* in, float* out,
++                                           int bin_start, int num_bins,
++                                           float db_min, float db_max,
++                                           int flip_x) {
++  int i = blockIdx.x * blockDim.x + threadIdx.x;
++  if (i < num_bins) {
++    float x = static_cast<float>(i) / static_cast<float>(num_bins - 1);
++    if (flip_x) x = 1.0f - x;
++    float y = (in[bin_start + i] - db_min) / (db_max - db_min);
++    y = fminf(fmaxf(y, 0.0f), 1.0f);
++    y = 1.0f - y;
++    out[2 * i] = x;
++    out[2 * i + 1] = y;
++  }
++}
++
++void normalize_to_coords(const float* in, float* out, int n,
++                         float db_min, float db_max,
++                         int bin_start, int bin_end,
++                         int flip_x, cudaStream_t stream) {
++  int num_bins = bin_end - bin_start;
++  int threads = 256;
++  int blocks = (num_bins + threads - 1) / threads;
++  normalize_to_coords_kernel<<<blocks, threads, 0, stream>>>(in, out, bin_start, num_bins, db_min, db_max, flip_x);
++}
++
++// ============================================================================
++// Accumulate linear power (for FFT averaging)
++// ============================================================================
++
++__global__ void accumulate_power_fftshift_kernel(const cufftComplex* in, float* accum, int n,
++                                                int reverse) {
++  int i = blockIdx.x * blockDim.x + threadIdx.x;
++  if (i < n) {
++    int src = reverse ? (n / 2 - i + n) % n : (i + n / 2) % n;
++    float re = in[src].x;
++    float im = in[src].y;
++    accum[i] += re * re + im * im;
++  }
++}
++
++void accumulate_power_fftshift(const cufftComplex* in, float* accum, int n,
++                               int reverse, cudaStream_t stream) {
++  int threads = 256;
++  int blocks = (n + threads - 1) / threads;
++  accumulate_power_fftshift_kernel<<<blocks, threads, 0, stream>>>(in, accum, n, reverse);
++}
++
++// ============================================================================
++// Convert accumulated power to dB (finalize averaging)
++// ============================================================================
++
++__global__ void power_to_db_kernel(const float* accum, float* out, int n, int num_averages) {
++  int i = blockIdx.x * blockDim.x + threadIdx.x;
++  if (i < n) {
++    float avg_power = accum[i] / static_cast<float>(num_averages);
++    if (avg_power < 1e-40f) avg_power = 1e-40f;
++    // Normalize to dBFS: reference = (N * INT16_MAX * Hanning_coherent_gain)^2
++    float ref = (float)n * 32768.0f * 0.5f;
++    out[i] = 10.0f * log10f(avg_power / (ref * ref));
++  }
++}
++
++
++void power_to_db(const float* accum, float* out, int n, int num_averages,
++                 cudaStream_t stream) {
++  int threads = 256;
++  int blocks = (n + threads - 1) / threads;
++  power_to_db_kernel<<<blocks, threads, 0, stream>>>(accum, out, n, num_averages);
++}
++
++// ============================================================================
++// Gather IQ from strided batch into contiguous accumulation buffer
++// ============================================================================
++
++__global__ void gather_iq_kernel(const uint8_t* src, int16_t* dst,
++                                 int num_pkts, int samples_per_pkt,
++                                 int stride_bytes, int dst_sample_offset) {
++  int idx = blockIdx.x * blockDim.x + threadIdx.x;
++  int total_samples = num_pkts * samples_per_pkt;
++  if (idx >= total_samples) return;
++
++  int pkt = idx / samples_per_pkt;
++  int sample_in_pkt = idx % samples_per_pkt;
++
++  // Source: pkt * stride_bytes + sample_in_pkt * 4 bytes (2x int16)
++  const int16_t* pkt_start = reinterpret_cast<const int16_t*>(src + pkt * stride_bytes);
++  int16_t i_val = pkt_start[sample_in_pkt * 2];
++  int16_t q_val = pkt_start[sample_in_pkt * 2 + 1];
++
++  // Destination: contiguous [I,Q,I,Q,...] starting at dst_sample_offset
++  int dst_idx = (dst_sample_offset + idx) * 2;
++  dst[dst_idx] = i_val;
++  dst[dst_idx + 1] = q_val;
++}
++
++void gather_iq_from_batch(const void* src, int16_t* dst,
++                          int num_pkts, int samples_per_pkt,
++                          int stride_bytes, int dst_sample_offset,
++                          cudaStream_t stream) {
++  int total_samples = num_pkts * samples_per_pkt;
++  int threads = 256;
++  int blocks = (total_samples + threads - 1) / threads;
++  gather_iq_kernel<<<blocks, threads, 0, stream>>>(
++      static_cast<const uint8_t*>(src), dst,
++      num_pkts, samples_per_pkt, stride_bytes, dst_sample_offset);
++}
+diff --git a/applications/hermes2host/cpp/spectral_kernels.cuh b/applications/hermes2host/cpp/spectral_kernels.cuh
+new file mode 100644
+index 000000000..7af9c23a9
+--- /dev/null
++++ b/applications/hermes2host/cpp/spectral_kernels.cuh
+@@ -0,0 +1,89 @@
++/*
++ * SPDX-FileCopyrightText: Copyright (c) 2025-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
++ * SPDX-License-Identifier: Apache-2.0
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ * http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#pragma once
++
++#include <cuda_runtime.h>
++#include <cufft.h>
++
++// Generate Hanning window coefficients on GPU.
++// out: float array of length n
++void generate_hanning_window(float* out, int n, cudaStream_t stream);
++
++// Convert interleaved int16 IQ samples to complex float and apply window.
++// in:  int16_t pairs [S0,S1,S2,S3,...] of length num_samples*2
++// window: float array of length num_samples (precomputed)
++// out: cufftComplex array of length num_samples
++// iq_swap: 0=first sample is I (default), 1=first sample is Q
++void apply_window_int16_to_complex(const int16_t* in, const float* window,
++                                   cufftComplex* out, int num_samples,
++                                   int iq_swap, cudaStream_t stream);
++
++// Compute magnitude-squared in dB with fftshift: 10*log10(re²+im²)
++// Reorders output so DC is centered.
++// reverse: if nonzero, flip spectrum (for FPGA IQ convention correction)
++void magnitude_db_fftshift(const cufftComplex* in, float* out, int n,
++                           int reverse, cudaStream_t stream);
++
++// Zero out the DC bin (center bin after fftshift) to remove ADC DC offset from display.
++// Replaces the center bin(s) with the average of their neighbors.
++// out: float array of length n (magnitude in dB, post-fftshift)
++// dc_bins: number of center bins to blank (1 = just DC, 3 = DC±1)
++void dc_block_magnitude(float* out, int n, int dc_bins, cudaStream_t stream);
++
++// Normalize dB values to [0,1] range and pack as (x,y) coordinate pairs for Holoviz.
++// Only bins in [bin_start, bin_end) are mapped to x=[0,1].
++// in:        float array of length n (magnitude in dB)
++// out:       float array of length n*2 (interleaved x,y pairs)
++// db_min:    minimum dB value mapped to y=1 (bottom)
++// db_max:    maximum dB value mapped to y=0 (top)
++// bin_start: first bin to display (inclusive)
++// bin_end:   last bin to display (exclusive)
++// flip_x:   if nonzero, reverse x direction (for spectrum mirroring with iq_swap)
++void normalize_to_coords(const float* in, float* out, int n,
++                         float db_min, float db_max,
++                         int bin_start, int bin_end,
++                         int flip_x, cudaStream_t stream);
++
++// Accumulate |FFT[bin]|²/N² into a running power sum (fftshifted).
++// Each call adds one frame's power. Caller divides by num_averages at finalization.
++// in:    cufftComplex[n] (FFT output, natural order)
++// accum: float[n] (running sum, fftshifted indexing)
++// reverse: if nonzero, flip spectrum direction
++void accumulate_power_fftshift(const cufftComplex* in, float* accum, int n,
++                               int reverse, cudaStream_t stream);
++
++// Finalize averaged power to dB: out[i] = 10*log10(accum[i] / num_averages).
++// Floors at -200 dB to avoid log(0).
++// accum: float[n] (accumulated power sum)
++// out:   float[n] (magnitude in dB)
++void power_to_db(const float* accum, float* out, int n, int num_averages,
++                 cudaStream_t stream);
++
++// Gather IQ samples from a strided batch buffer into a contiguous accumulation buffer.
++// Batch layout: num_pkts packets, each stride_bytes apart, IQ data at offset 0 of each.
++// Extracts samples_per_pkt complex samples (= samples_per_pkt*2 int16 values) per packet.
++// src:             batch buffer start (GPU)
++// dst:             accumulation buffer destination (GPU, offset by dst_sample_offset)
++// num_pkts:        packets to extract from this batch
++// samples_per_pkt: complex samples per packet (e.g., 128)
++// stride_bytes:    distance between packet starts in the batch (nom_payload_size)
++// dst_sample_offset: sample index in dst where first packet's data goes
++void gather_iq_from_batch(const void* src, int16_t* dst,
++                          int num_pkts, int samples_per_pkt,
++                          int stride_bytes, int dst_sample_offset,
++                          cudaStream_t stream);
+diff --git a/applications/hermes2host/cpp/spectral_op.h b/applications/hermes2host/cpp/spectral_op.h
+new file mode 100644
+index 000000000..181aa98d8
+--- /dev/null
++++ b/applications/hermes2host/cpp/spectral_op.h
+@@ -0,0 +1,371 @@
++/*
++ * SPDX-FileCopyrightText: Copyright (c) 2025-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
++ * SPDX-License-Identifier: Apache-2.0
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ * http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++/*
++ * SpectralOp — Windowed FFT with averaging and magnitude display
++ *
++ * Input:  TensorMap with per-antenna [fft_size, 2] int16 IQ tensors from HermesRxOp
++ * Output: TensorMap with display-ready [fft_size, 2] float32 normalized coords for Holoviz
++ *
++ * Processing per compute() call:
++ *   1. For each antenna: window(int16→float) → cuFFT → accumulate power OR finalize
++ *   2. Averaging: accumulate |FFT|²/N² over num_averages frames in linear power domain
++ *   3. When avg_count reaches num_averages: 10*log10(avg) → DC block → normalize → emit
++ *   4. Between emissions: re-emit previous result to keep Holoviz fed
++ *
++ * Grid overlays: 10 vertical frequency ticks + 10 horizontal dB reference lines
++ */
++
++#pragma once
++
++#include "holoscan/holoscan.hpp"
++#include "spectral_kernels.cuh"
++
++#include <cuda_runtime.h>
++#include <cufft.h>
++#include <vector>
++#include <string>
++#include <cstdio>
++
++namespace holoscan::ops {
++
++class SpectralOp : public Operator {
++ public:
++  HOLOSCAN_OPERATOR_FORWARD_ARGS(SpectralOp)
++  SpectralOp() = default;
++
++  ~SpectralOp() { freeResources(); }
++
++  void setup(OperatorSpec& spec) override {
++    spec.input<holoscan::TensorMap>("iq_in")
++        .connector(holoscan::IOSpec::ConnectorType::kDoubleBuffer,
++                   holoscan::Arg("capacity", static_cast<uint64_t>(2)),
++                   holoscan::Arg("policy", static_cast<uint64_t>(0)));
++    spec.output<holoscan::TensorMap>("out")
++        .connector(holoscan::IOSpec::ConnectorType::kDoubleBuffer,
++                   holoscan::Arg("capacity", static_cast<uint64_t>(2)),
++                   holoscan::Arg("policy", static_cast<uint64_t>(0)));
++
++    spec.param(fft_size_, "fft_size", "FFT size", "Complex samples per FFT", 65536);
++    spec.param(num_antennas_, "num_antennas", "Antennas", "Number of antenna channels", 1);
++    spec.param(num_averages_, "num_averages", "FFT averages",
++               "Number of FFT frames to average in linear power (1=no averaging)", 1);
++    spec.param(dc_block_bins_, "dc_block_bins", "DC block bins",
++               "Number of center bins to blank for DC removal", 5);
++    spec.param(db_min_, "db_min", "dB minimum", "Display floor in dB", -80.0f);
++    spec.param(db_max_, "db_max", "dB maximum", "Display ceiling in dB", 20.0f);
++    spec.param(bin_start_, "bin_start", "Display start bin", "First FFT bin to display", 0);
++    spec.param(bin_end_, "bin_end", "Display end bin", "Last FFT bin to display (0=all)", 0);
++    spec.param(iq_swap_, "iq_swap", "IQ swap", "Swap I/Q (0=I first, 1=Q first)", 0);
++    spec.param(freq_tick_positions_, "freq_tick_positions", "Frequency tick positions",
++               "Normalized [0,1] x-positions for frequency grid lines", std::vector<float>{});
++  }
++
++  void initialize() override {
++    Operator::initialize();
++
++    const int N = fft_size_.get();
++    const int A = num_antennas_.get();
++
++    resolved_bin_start_ = bin_start_.get();
++    resolved_bin_end_ = (bin_end_.get() == 0) ? N : bin_end_.get();
++
++    cudaStreamCreate(&stream_);
++
++    // Hanning window (precomputed once)
++    cudaMalloc(&window_d_, N * sizeof(float));
++    generate_hanning_window(window_d_, N, stream_);
++
++    // Per-antenna processing buffers
++    fft_in_d_.resize(A, nullptr);
++    fft_out_d_.resize(A, nullptr);
++    power_accum_d_.resize(A, nullptr);
++    mag_d_.resize(A, nullptr);
++    coords_d_.resize(A, nullptr);
++    iq_snapshot_d_.resize(A, nullptr);
++
++    for (int a = 0; a < A; a++) {
++      cudaMalloc(&iq_snapshot_d_[a], N * 2 * sizeof(int16_t));
++      cudaMalloc(&fft_in_d_[a], N * sizeof(cufftComplex));
++      cudaMalloc(&fft_out_d_[a], N * sizeof(cufftComplex));
++      cudaMalloc(&power_accum_d_[a], N * sizeof(float));
++      cudaMemsetAsync(power_accum_d_[a], 0, N * sizeof(float), stream_);
++      cudaMalloc(&mag_d_[a], N * sizeof(float));
++      cudaMalloc(&coords_d_[a], N * 2 * sizeof(float));
++    }
++
++    cufftPlan1d(&fft_plan_, N, CUFFT_C2C, 1);
++    cufftSetStream(fft_plan_, stream_);
++
++    initGridOverlays();
++    cudaStreamSynchronize(stream_);
++
++    HOLOSCAN_LOG_INFO("SpectralOp::initialize() — fft={} antennas={} averages={} dB=[{},{}] iq_swap={} bins=[{},{}]",
++                      N, A, num_averages_.get(), db_min_.get(), db_max_.get(),
++                      iq_swap_.get(), resolved_bin_start_, resolved_bin_end_);
++  }
++
++  void compute(InputContext& op_input, OutputContext& op_output,
++               ExecutionContext& /*context*/) override {
++    auto maybe_input = op_input.receive<holoscan::TensorMap>("iq_in");
++
++    if (maybe_input) {
++      const auto& input = maybe_input.value();
++      const int N = fft_size_.get();
++      const int A = num_antennas_.get();
++      const int num_avg = num_averages_.get();
++
++      for (int a = 0; a < A; a++) {
++        std::string key = "antenna_" + std::to_string(a);
++        auto it = input.find(key);
++        if (it == input.end()) continue;
++
++        const auto& tensor = it->second;
++        const int16_t* iq_ptr = static_cast<const int16_t*>(tensor->data());
++
++        // Window + int16→complex float
++        apply_window_int16_to_complex(iq_ptr, window_d_, fft_in_d_[a], N, iq_swap_.get(), stream_);
++
++        // Forward FFT
++        cufftExecC2C(fft_plan_, fft_in_d_[a], fft_out_d_[a], CUFFT_FORWARD);
++
++        if (num_avg > 1) {
++          accumulate_power_fftshift(fft_out_d_[a], power_accum_d_[a], N, 0, stream_);
++        } else {
++          magnitude_db_fftshift(fft_out_d_[a], mag_d_[a], N, 0, stream_);
++          dc_block_magnitude(mag_d_[a], N, dc_block_bins_.get(), stream_);
++          normalize_to_coords(mag_d_[a], coords_d_[a], N, db_min_.get(), db_max_.get(), resolved_bin_start_, resolved_bin_end_, 0, stream_);
++        }
++      }
++
++      avg_count_++;
++
++      if (num_avg > 1 && avg_count_ >= num_avg) {
++        // Finalize averaging
++        for (int a = 0; a < A; a++) {
++          power_to_db(power_accum_d_[a], mag_d_[a], N, num_avg, stream_);
++          dc_block_magnitude(mag_d_[a], N, dc_block_bins_.get(), stream_);
++          normalize_to_coords(mag_d_[a], coords_d_[a], N, db_min_.get(), db_max_.get(), resolved_bin_start_, resolved_bin_end_, 0, stream_);
++          // Reset accumulator for next averaging window
++          cudaMemsetAsync(power_accum_d_[a], 0, N * sizeof(float), stream_);
++        }
++        // DEBUG: find peak bin to verify frequency mapping
++        {
++          std::vector<float> tmp(N);
++          cudaMemcpyAsync(tmp.data(), mag_d_[0], N * sizeof(float), cudaMemcpyDeviceToHost, stream_);
++          cudaStreamSynchronize(stream_);
++          int peak_bin = std::max_element(tmp.begin(), tmp.end()) - tmp.begin();
++          if (peak_log_count_ < 5) {
++            HOLOSCAN_LOG_INFO("DEBUG peak bin: {} (offset from center: {}, N={})",
++                              peak_bin, peak_bin - N/2, N);
++            peak_log_count_++;
++          }
++        }
++        avg_count_ = 0;
++        cudaStreamSynchronize(stream_);
++        has_result_ = true;
++      } else if (num_avg == 1) {
++        cudaStreamSynchronize(stream_);
++        has_result_ = true;
++      }
++      // else: still accumulating, don't update has_result_
++    }
++
++    // Emit current result (or re-emit previous to keep Holoviz fed)
++    if (has_result_) {
++      emit_result(op_output);
++    }
++  }
++
++ private:
++  void emit_result(OutputContext& op_output) {
++    const int A = num_antennas_.get();
++    const int num_bins = resolved_bin_end_ - resolved_bin_start_;
++
++    holoscan::TensorMap out_msg;
++    emitGridOverlays(out_msg);
++
++    for (int a = 0; a < A; a++) {
++      std::string name = "antenna_" + std::to_string(a);
++      emitTensor(out_msg, name.c_str(), coords_d_[a], num_bins, 2);
++    }
++
++    op_output.emit(out_msg, "out");
++  }
++
++  // =========================================================================
++  // Grid overlay helpers
++  // =========================================================================
++
++  void initGridOverlays() {
++    constexpr int NUM_DB_TICKS = 10;
++
++    // --- Frequency axis: vertical lines at dynamic integer-MHz positions ---
++    const auto& xpos = freq_tick_positions_.get();
++    const int num_freq_ticks = static_cast<int>(xpos.size());
++
++    if (num_freq_ticks > 0) {
++      std::vector<float> freq_lines(num_freq_ticks * 4);
++      for (int t = 0; t < num_freq_ticks; t++) {
++        float x = xpos[t];
++        freq_lines[t * 4 + 0] = x;
++        freq_lines[t * 4 + 1] = 0.0f;
++        freq_lines[t * 4 + 2] = x;
++        freq_lines[t * 4 + 3] = 1.0f;
++      }
++      cudaMalloc(&ticks_d_, freq_lines.size() * sizeof(float));
++      cudaMemcpy(ticks_d_, freq_lines.data(), freq_lines.size() * sizeof(float), cudaMemcpyHostToDevice);
++      num_tick_points_ = num_freq_ticks * 2;
++
++      num_labels_ = num_freq_ticks;
++      for (int t = 0; t < num_freq_ticks; t++) {
++        float pos[3] = {xpos[t], 0.97f, 0.02f};
++        float* d = nullptr;
++        cudaMalloc(&d, 3 * sizeof(float));
++        cudaMemcpy(d, pos, 3 * sizeof(float), cudaMemcpyHostToDevice);
++        label_coords_d_.push_back(d);
++      }
++    }
++
++    // --- dB axis: horizontal lines + label positions ---
++    float db_lines[NUM_DB_TICKS * 2 * 2];
++    for (int t = 0; t < NUM_DB_TICKS; t++) {
++      float y = static_cast<float>(t + 1) / static_cast<float>(NUM_DB_TICKS + 1);
++      db_lines[t * 4 + 0] = 0.0f;
++      db_lines[t * 4 + 1] = y;
++      db_lines[t * 4 + 2] = 1.0f;
++      db_lines[t * 4 + 3] = y;
++    }
++    cudaMalloc(&db_ticks_d_, sizeof(db_lines));
++    cudaMemcpy(db_ticks_d_, db_lines, sizeof(db_lines), cudaMemcpyHostToDevice);
++    num_db_ticks_ = NUM_DB_TICKS;
++
++    for (int t = 0; t < NUM_DB_TICKS; t++) {
++      float y = static_cast<float>(t + 1) / static_cast<float>(NUM_DB_TICKS + 1);
++      float pos[3] = {0.01f, y, 0.02f};
++      float* d = nullptr;
++      cudaMalloc(&d, 3 * sizeof(float));
++      cudaMemcpy(d, pos, 3 * sizeof(float), cudaMemcpyHostToDevice);
++      db_label_coords_d_.push_back(d);
++    }
++  }
++
++  // =========================================================================
++  // Tensor emission helpers
++  // =========================================================================
++
++  void emitTensor(holoscan::TensorMap& out, const char* name,
++                  float* data, int64_t rows, int64_t cols) {
++    DLManagedTensor* dl = new DLManagedTensor();
++    dl->dl_tensor.data = data;
++    dl->dl_tensor.device = DLDevice{kDLCUDA, 0};
++    dl->dl_tensor.ndim = 2;
++    dl->dl_tensor.dtype = DLDataType{kDLFloat, 32, 1};
++    dl->dl_tensor.shape = new int64_t[2]{rows, cols};
++    dl->dl_tensor.strides = nullptr;
++    dl->dl_tensor.byte_offset = 0;
++    dl->manager_ctx = nullptr;
++    dl->deleter = [](DLManagedTensor* self) {
++      delete[] self->dl_tensor.shape;
++      delete self;
++    };
++    out[name] = std::make_shared<holoscan::Tensor>(dl);
++  }
++
++  void emitGridOverlays(holoscan::TensorMap& out) {
++    emitTensor(out, "freq_ticks", ticks_d_, num_tick_points_, 2);
++    for (int t = 0; t < num_labels_; t++) {
++      char name[64];
++      snprintf(name, sizeof(name), "label_%d", t);
++      emitTensor(out, name, label_coords_d_[t], 1, 3);
++    }
++
++    emitTensor(out, "db_ticks", db_ticks_d_, num_db_ticks_ * 2, 2);
++    for (int t = 0; t < num_db_ticks_; t++) {
++      char name[64];
++      snprintf(name, sizeof(name), "db_label_%d", t);
++      emitTensor(out, name, db_label_coords_d_[t], 1, 3);
++    }
++  }
++
++  // =========================================================================
++
++  void freeResources() {
++    if (fft_plan_) cufftDestroy(fft_plan_);
++    if (window_d_) cudaFree(window_d_);
++    if (ticks_d_) cudaFree(ticks_d_);
++    if (db_ticks_d_) cudaFree(db_ticks_d_);
++    for (auto p : label_coords_d_) { if (p) cudaFree(p); }
++    for (auto p : db_label_coords_d_) { if (p) cudaFree(p); }
++    for (size_t a = 0; a < fft_in_d_.size(); a++) {
++      if (iq_snapshot_d_[a]) cudaFree(iq_snapshot_d_[a]);
++      if (fft_in_d_[a]) cudaFree(fft_in_d_[a]);
++      if (fft_out_d_[a]) cudaFree(fft_out_d_[a]);
++      if (power_accum_d_[a]) cudaFree(power_accum_d_[a]);
++      if (mag_d_[a]) cudaFree(mag_d_[a]);
++      if (coords_d_[a]) cudaFree(coords_d_[a]);
++    }
++    if (stream_) cudaStreamDestroy(stream_);
++  }
++
++  // CUDA state
++  cudaStream_t stream_ = nullptr;
++  cufftHandle fft_plan_ = 0;
++  float* window_d_ = nullptr;
++
++  // Per-antenna processing buffers
++  std::vector<int16_t*> iq_snapshot_d_;
++  std::vector<cufftComplex*> fft_in_d_;
++  std::vector<cufftComplex*> fft_out_d_;
++  std::vector<float*> power_accum_d_;
++  std::vector<float*> mag_d_;
++  std::vector<float*> coords_d_;
++
++  // Static display elements
++  float* ticks_d_ = nullptr;
++  int num_tick_points_ = 0;
++  int num_labels_ = 0;
++  std::vector<float*> label_coords_d_;
++
++  // dB reference lines
++  float* db_ticks_d_ = nullptr;
++  int num_db_ticks_ = 0;
++  std::vector<float*> db_label_coords_d_;
++
++  // Display bin range (resolved at init)
++  int resolved_bin_start_ = 0;
++  int resolved_bin_end_ = 0;
++
++  // Averaging state
++  int avg_count_ = 0;
++  bool has_result_ = false;
++  int peak_log_count_ = 0;
++
++  // Parameters
++  Parameter<int> fft_size_;
++  Parameter<int> num_antennas_;
++  Parameter<int> num_averages_;
++  Parameter<int> dc_block_bins_;
++  Parameter<float> db_min_;
++  Parameter<float> db_max_;
++  Parameter<int> bin_start_;
++  Parameter<int> bin_end_;
++  Parameter<int> iq_swap_;
++  Parameter<std::vector<float>> freq_tick_positions_;
++};
++
++}  // namespace holoscan::ops
+diff --git a/applications/hermes2host/hermes2host.yaml b/applications/hermes2host/hermes2host.yaml
+new file mode 100644
+index 000000000..af3eb8e40
+--- /dev/null
++++ b/applications/hermes2host/hermes2host.yaml
+@@ -0,0 +1,140 @@
++%YAML 1.2
++# SPDX-FileCopyrightText: Copyright (c) 2025-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
++# SPDX-License-Identifier: Apache-2.0
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++# http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++---
++
++# =============================================================================
++# HSB FPGA Configuration
++# =============================================================================
++# These parameters program the FPGA via hololink's configure_roce and control
++# packet sizing. The code computes all derived values (max_packet_size,
++# header_size, samples_per_antenna) from these inputs — no need to keep
++# multiple fields in sync manually.
++#
++# payload_size: FPGA payload bytes per packet (between RoCE headers and ICRC).
++#   total_ethernet_frame = 70 (RoCE headers) + payload_size + 4 (ICRC)
++#
++# mtu: Maximum per-packet payload the Holoscan IP will send. Must be >=
++#   payload_size for single-packet delivery. Hardware max is 4096 bytes.
++#
++# custom_header_size: Bytes the FPGA prepends to IQ data within the payload
++#   (e.g., magic + sequence number). Set to 0 if the payload is pure IQ.
++#
++hsb:
++  hololink_ip: "192.168.0.2"   # HSB FPGA data-plane IP (overridable with --hololink CLI arg)
++  payload_size:  3920          # FPGA payload bytes per packet (observed via pcap RETH DMA_len)
++  mtu: 4096                    # Max bytes per RoCE packet payload (Holoscan IP limit: 4096)
++  custom_header_size: 0        # Bytes before IQ data in payload (magic+seq+reserved; 0 if none)
++  data_port: 4096              # UDP destination port the FPGA sends to (must match flow udp_dst)
++
++# =============================================================================
++# Holoscan Scheduler
++# =============================================================================
++scheduler:
++  check_recession_period_ms: 0
++  worker_thread_number: 5
++  stop_on_deadlock: true
++  stop_on_deadlock_timeout: -1
++
++# =============================================================================
++# DAQIRI DPDK Configuration
++# =============================================================================
++# Configures DPDK NIC binding, memory pools, and flow rules.
++#
++# The FPGA sends RoCE v2 framed UDP packets.
++# DAQIRI delivers the FULL Ethernet frame (Eth header NOT stripped).
++#
++# buf_size must be >= 70 + payload_size + 4 + ~128 (DPDK headroom), rounded
++# up to a power of 2. The code will warn at startup if this is too small.
++#
++daqiri:
++  cfg:
++    version: 1
++    stream_type: "raw"
++    master_core: 8 # non isolated core
++    debug: false
++    log_level: "info"
++    loopback: ""
++
++    memory_regions:
++    - name: "HSB_RX_CPU"
++      kind: "host_pinned" # required for dgx spark 
++      affinity: 0
++      num_bufs: 409600
++      buf_size: 8192            # Must be >= 70 + payload_size + 4 + ~128 headroom
++
++    interfaces:
++    - name: "hsb_rx_port"
++      address: "0002:01:00.0"   # NIC PCI BDF address
++      rx:
++        flow_isolation: true
++        queues:
++        - name: "rx_q_0"
++          id: 0
++          cpu_core: 16  # isolated core
++          batch_size: 20480
++          memory_regions:
++            - "HSB_RX_CPU"
++        flows:
++        - name: "hsb_flow"
++          id: 0
++          action:
++            type: queue
++            id: 0
++          match:
++            udp_src: 12288      # FPGA source port (constant: DATA_SOURCE_UDP_PORT in FPGA)
++            udp_dst: 4096       # Must equal hsb.data_port above
++
++# =============================================================================
++# HermesRxOp — DPDK RX Operator (packet reception only)
++# =============================================================================
++# Receives packets, filters metadata, accumulates IQ samples per antenna into
++# FFT-sized GPU buffers, and emits raw int16 IQ to downstream operators.
++#
++# max_packet_size, header_size, and samples_per_antenna are computed by the
++# application from hsb.payload_size, hsb.custom_header_size, and num_antennas.
++# They do not need to be specified here.
++#
++hermes_rx:
++  interface_name: "hsb_rx_port"
++  gpu_direct: false
++  batch_size: 2048
++
++# =============================================================================
++# SpectralOp — FFT + Averaging + Magnitude (GPU DSP)
++# =============================================================================
++# Receives raw int16 IQ from HermesRxOp, computes windowed FFT with optional
++# averaging, and emits normalized display coordinates for Holoviz.
++#
++# NOTE: fft_size, num_antennas, and num_averages are set via CLI args and
++# passed to both hermes_rx and spectral operators — no need to duplicate here.
++#
++spectral:
++  dc_block_bins: 5              # Number of center bins to blank (0=disabled, 5=remove DC offset)
++  iq_swap: 0                    # 0=I,Q as-is  1=swap Q,I  2=I,Q conjugate (negate Q)
++  db_min: -130.0                # Display floor in dBFS
++  db_max: -6.0                 # Display ceiling in dBFS (0 dBFS = full scale)
++
++# =============================================================================
++# DDCOp — Digital Down-Converter (PLACEHOLDER)
++# =============================================================================
++# Receives raw int16 IQ from HermesRxOp (same data as SpectralOp via fan-out).
++# When implemented: extracts a narrowband signal and outputs complex float32 IQ
++# for downstream ML inference.
++#
++ddc:
++  enabled: false                # When false, operator receives but discards data
++  center_frequency_hz: 3.5e9   # Frequency of interest (Hz)
++  bandwidth_hz: 1.0e6           # Extraction bandwidth (Hz)
+diff --git a/pkg/holoscan-networking/Dockerfile b/pkg/holoscan-networking/Dockerfile
+index fd5140f67..5cc36efeb 100644
+--- a/pkg/holoscan-networking/Dockerfile
++++ b/pkg/holoscan-networking/Dockerfile
+@@ -148,6 +148,14 @@ RUN CUDA_VERSION=$(nvcc --version | sed -n 's/^.*release \([0-9]\+\.[0-9]\+\).*$
+         ibverbs-utils \
+         python3-dev \
+         rustc \
++        libx11-dev \
++        libxcursor-dev \
++        libxrandr-dev \
++        libxinerama-dev \
++        libxi-dev \
++        libgl-dev \
++        libglx-dev \
++        libegl-dev \
+     && rm -rf /var/lib/apt/lists/*
+ 
+ # PIP installs
+@@ -199,7 +207,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
+         pkgconf \
+         meson \
+         python3-pyelftools \
+-        libnuma-dev \
++        libnuma-dev libpcap-dev \
+     && rm -rf /var/lib/apt/lists/*
+ 
+ COPY pkg/holoscan-networking/dpdk_patches /tmp/dpdk_patches
+@@ -225,8 +233,7 @@ RUN curl -fsSL https://fast.dpdk.org/rel/dpdk-${DPDK_VERSION}.tar.xz -o /tmp/dpd
+         -Dtests=false \
+         -Dplatform=generic \
+         -Denable_docs=false \
+-        -Ddisable_apps=* \
+-        -Denable_drivers=bus/auxiliary,bus/pci,bus/vdev,common/mlx5,mempool/ring,mempool/stack,net/af_packet,net/mlx5,net/ring \
++        -Denable_drivers=bus/auxiliary,bus/pci,bus/vdev,common/mlx5,mempool/ring,mempool/stack,net/af_packet,net/mlx5,net/ring,net/pcap \
+     && cd ${DPDK_BUILD_DIR} \
+     && ninja \
+     && meson install \

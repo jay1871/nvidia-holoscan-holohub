@@ -88,6 +88,8 @@ add_subdirectory(h264)
 add_holohub_application(high_speed_endoscopy DEPENDS
                         OPERATORS emergent_source)
 
+add_holohub_application(hitek9081)
+
 add_holohub_application(holocat)
 
 add_holohub_application(isaac_sim_holoscan_bridge)
