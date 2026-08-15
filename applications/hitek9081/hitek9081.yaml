@@ -34,7 +34,7 @@
 #
 hsb:
   hololink_ip: "192.168.0.2"   # HSB FPGA data-plane IP (overridable with --hololink CLI arg)
-  payload_size:  3920          # FPGA payload bytes per packet (observed via pcap RETH DMA_len)
+  payload_size:  3904          # FPGA payload bytes per packet (observed via pcap RETH DMA_len)
   mtu: 4096                    # Max bytes per RoCE packet payload (Holoscan IP limit: 4096)
   custom_header_size: 0        # Bytes before IQ data in payload (magic+seq+reserved; 0 if none)
   data_port: 4096              # UDP destination port the FPGA sends to (must match flow udp_dst)
