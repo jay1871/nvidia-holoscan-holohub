@@ -306,13 +306,15 @@ class Hitek9081RxOp : public Operator {
       double secs = elapsed / 1000.0;
       int64_t delta_frames = ttl_data_frames_ - last_report_frames_;
       int64_t delta_bytes = ttl_payload_bytes_ - last_report_bytes_;
+      int64_t delta_psn_gaps = ttl_psn_gaps_ - last_report_psn_gaps_;
       double mfps = delta_frames / (secs * 1e6);
       double payload_gbps = delta_bytes * 8.0 / (secs * 1e9);
       double payload_mbps = delta_bytes / (secs * 1e6);
       HOLOSCAN_LOG_INFO("RX: {:.3f} Mfps | {:.2f} Gbps ({:.0f} MB/s) | {} frames | PSN gaps: {}",
-                        mfps, payload_gbps, payload_mbps, ttl_data_frames_, ttl_psn_gaps_);
+                        mfps, payload_gbps, payload_mbps, ttl_data_frames_, delta_psn_gaps);
       last_report_frames_ = ttl_data_frames_;
       last_report_bytes_ = ttl_payload_bytes_;
+      last_report_psn_gaps_ = ttl_psn_gaps_;
       last_report_time_ = now;
     }
   }
@@ -518,6 +520,7 @@ class Hitek9081RxOp : public Operator {
   std::chrono::steady_clock::time_point last_report_time_ = std::chrono::steady_clock::now();
   int64_t last_report_frames_ = 0;
   int64_t last_report_bytes_ = 0;
+  int64_t last_report_psn_gaps_ = 0;
 };
 
 }  // namespace holoscan::ops
