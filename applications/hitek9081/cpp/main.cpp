@@ -474,11 +474,7 @@ int main(int argc, char** argv) {
   HOLOSCAN_LOG_INFO("Enumerating HSB at {} ...", hololink_ip);
   hololink::Metadata channel_metadata = hololink::Enumerator::find_channel(hololink_ip);
   hololink::DataChannel::use_sensor(channel_metadata, 0);
-
-  hololink::Metadata overrides;
-  overrides["block_enable"] = int64_t(0);
-  overrides["mtu"] = int64_t(mtu);
-  channel_metadata.update(overrides);
+  hololink::DataChannel::use_mtu(channel_metadata, mtu);
 
   hololink::DataChannel hololink_channel(channel_metadata);
   std::shared_ptr<hololink::Hololink> hololink = hololink_channel.hololink();
@@ -488,10 +484,6 @@ int main(int argc, char** argv) {
   HOLOSCAN_LOG_INFO("Resetting hololink...");
   hololink->reset();
 
-  std::shared_ptr<hololink::HTK_JESD_HPS_Config> mxfe_config_;
-  mxfe_config_ = std::make_shared<hololink::HTK_JESD_HPS_Config>(*hololink);
-  mxfe_config_->host_pause_mapping(1);
-  mxfe_config_->apply();
   // -------------------------------------------------------------------------
   // Phase 2: DAQIRI init
   // -------------------------------------------------------------------------
@@ -507,6 +499,12 @@ int main(int argc, char** argv) {
   // -------------------------------------------------------------------------
   hololink_channel.authenticate(0, 0);
   hololink_channel.configure_roce(0, frame_size, page_size, pages, data_port);
+
+  std::shared_ptr<hololink::HTK_JESD_HPS_Config> mxfe_config_;
+  mxfe_config_ = std::make_shared<hololink::HTK_JESD_HPS_Config>(*hololink);
+  mxfe_config_->host_pause_mapping(1);
+  mxfe_config_->apply();
+
 
   // MTU was injected into channel_metadata before DataChannel construction,
   // so configure_roce() → configure_common() computes DP_PACKET_SIZE natively

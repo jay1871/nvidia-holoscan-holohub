@@ -78,7 +78,7 @@ add_executable(hitek9081
   ddc_kernels.cu
   main.cpp
 )
-set_target_properties(hitek9081 PROPERTIES CUDA_ARCHITECTURES "90")
+set_target_properties(hitek9081 PROPERTIES CUDA_ARCHITECTURES "90;120;121")
 target_link_libraries(hitek9081
   PRIVATE
     holoscan::core
