@@ -156,6 +156,8 @@ class Hitek9081RxOp : public Operator {
                "Number of antennas in the packet", 1);
     spec.param<int>(samples_per_antenna_, "samples_per_antenna", "Samples per antenna",
                "Complex samples per antenna per packet", 128);
+    spec.param<int>(iq_format_, "iq_format", "IQ format",
+               "0=pair-interleaved [I,Q,I,Q,...], 1=block-4 [IIII,QQQQ,...]", 1);
   }
 
   void compute(InputContext& op_input, OutputContext& op_output,
@@ -397,7 +399,7 @@ class Hitek9081RxOp : public Operator {
       for (int a = 0; a < num_antennas_.get(); a++) {
         gather_iq_from_batch(src, static_cast<int16_t*>(accum_bufs_[active_buf_][a]),
                              pkts_to_copy, S, nom_payload_size_,
-                             accum_offset_, accum_stream_);
+                             accum_offset_, iq_format_.get(), accum_stream_);
       }
 
       accum_offset_ += samples_to_copy;
@@ -515,6 +517,7 @@ class Hitek9081RxOp : public Operator {
   Parameter<int> fft_size_;
   Parameter<int> num_antennas_;
   Parameter<int> samples_per_antenna_;
+  Parameter<int> iq_format_;
 
   // Throughput reporting
   std::chrono::steady_clock::time_point last_report_time_ = std::chrono::steady_clock::now();

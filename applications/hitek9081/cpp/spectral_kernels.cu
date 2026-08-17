@@ -235,11 +235,16 @@ void magnitude_db_fftshift_f32(const float2* in, float* out, int n,
 
 // ============================================================================
 // Gather IQ from strided batch into contiguous accumulation buffer
+//
+// iq_format:
+//   0 = pair-interleaved: [I0,Q0,I1,Q1,I2,Q2,...] (2 int16 per sample)
+//   1 = block-interleaved groups of 4: [I0,I1,I2,I3,Q0,Q1,Q2,Q3,...] (8 int16 per 4 samples)
 // ============================================================================
 
 __global__ void gather_iq_kernel(const uint8_t* src, int16_t* dst,
                                  int num_pkts, int samples_per_pkt,
-                                 int stride_bytes, int dst_sample_offset) {
+                                 int stride_bytes, int dst_sample_offset,
+                                 int iq_format) {
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
   int total_samples = num_pkts * samples_per_pkt;
   if (idx >= total_samples) return;
@@ -247,10 +252,23 @@ __global__ void gather_iq_kernel(const uint8_t* src, int16_t* dst,
   int pkt = idx / samples_per_pkt;
   int sample_in_pkt = idx % samples_per_pkt;
 
-  // Source: pkt * stride_bytes + sample_in_pkt * 4 bytes (2x int16)
   const int16_t* pkt_start = reinterpret_cast<const int16_t*>(src + pkt * stride_bytes);
-  int16_t i_val = pkt_start[sample_in_pkt * 2];
-  int16_t q_val = pkt_start[sample_in_pkt * 2 + 1];
+
+  int16_t i_val, q_val;
+
+  if (iq_format == 1) {
+    // Block-interleaved: [I0,I1,I2,I3,Q0,Q1,Q2,Q3] per group of 4 samples
+    int group = sample_in_pkt / 4;
+    int pos   = sample_in_pkt % 4;
+    i_val = pkt_start[group * 8 + pos];
+    q_val = pkt_start[group * 8 + pos + 4];
+  } else {
+    // Pair-interleaved: [I0,Q0,I1,Q1,...] (original format)
+    // i_val = pkt_start[sample_in_pkt * 2];
+    // q_val = pkt_start[sample_in_pkt * 2 + 1];
+    i_val = pkt_start[sample_in_pkt * 2];
+    q_val = pkt_start[sample_in_pkt * 2 + 1];
+  }
 
   // Destination: contiguous [I,Q,I,Q,...] starting at dst_sample_offset
   int dst_idx = (dst_sample_offset + idx) * 2;
@@ -261,11 +279,11 @@ __global__ void gather_iq_kernel(const uint8_t* src, int16_t* dst,
 void gather_iq_from_batch(const void* src, int16_t* dst,
                           int num_pkts, int samples_per_pkt,
                           int stride_bytes, int dst_sample_offset,
-                          cudaStream_t stream) {
+                          int iq_format, cudaStream_t stream) {
   int total_samples = num_pkts * samples_per_pkt;
   int threads = 256;
   int blocks = (total_samples + threads - 1) / threads;
   gather_iq_kernel<<<blocks, threads, 0, stream>>>(
       static_cast<const uint8_t*>(src), dst,
-      num_pkts, samples_per_pkt, stride_bytes, dst_sample_offset);
+      num_pkts, samples_per_pkt, stride_bytes, dst_sample_offset, iq_format);
 }

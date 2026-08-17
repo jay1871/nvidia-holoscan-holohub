@@ -80,10 +80,11 @@ void magnitude_db_fftshift_f32(const float2* in, float* out, int n,
 // src:             batch buffer start (GPU)
 // dst:             accumulation buffer destination (GPU, offset by dst_sample_offset)
 // num_pkts:        packets to extract from this batch
-// samples_per_pkt: complex samples per packet (e.g., 128)
+// samples_per_pkt: complex samples per packet (e.g., 976)
 // stride_bytes:    distance between packet starts in the batch (nom_payload_size)
 // dst_sample_offset: sample index in dst where first packet's data goes
+// iq_format: 0=pair-interleaved [I,Q,I,Q,...], 1=block-4 [IIII,QQQQ,...]
 void gather_iq_from_batch(const void* src, int16_t* dst,
                           int num_pkts, int samples_per_pkt,
                           int stride_bytes, int dst_sample_offset,
-                          cudaStream_t stream);
+                          int iq_format, cudaStream_t stream);

@@ -127,6 +127,8 @@ struct AppConfig {
   double freq_max_mhz = 0;
   int iq_swap = 1;
 
+  int iq_format = 1;  // 0=pair-interleaved [I,Q,I,Q,...], 1=block-4 [IIII,QQQQ,...]
+
   // Computed from hsb.payload_size, hsb.custom_header_size, num_antennas
   uint16_t max_packet_size = 1482;
   uint16_t header_size = 70;
@@ -165,6 +167,7 @@ class App : public holoscan::Application {
         Arg("max_packet_size", cfg_.max_packet_size),
         Arg("header_size", cfg_.header_size),
         Arg("samples_per_antenna", cfg_.samples_per_antenna),
+        Arg("iq_format", cfg_.iq_format),
         make_condition<BooleanCondition>("is_alive", true));
 
     // Compute display bin range from frequency zoom settings.
@@ -437,6 +440,7 @@ int main(int argc, char** argv) {
   const uint16_t header_size = static_cast<uint16_t>(ROCE_HEADER_SIZE + custom_header_size);
 
   cfg.num_antennas = yaml["hitek9081_rx"]["num_antennas"].as<int>(1);
+  cfg.iq_format = yaml["hitek9081_rx"]["iq_format"].as<int>(1);
   cfg.max_packet_size = max_packet_size;
   cfg.header_size = header_size;
   cfg.samples_per_antenna = static_cast<int>((frame_size - custom_header_size) / (cfg.num_antennas * 4));

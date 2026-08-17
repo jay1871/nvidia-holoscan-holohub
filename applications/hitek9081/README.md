@@ -28,6 +28,12 @@ Hitek9081RxOp ──→ SpectralOp ──→ HolovizOp
 - NIC bound to DPDK (`dpdk-devbind.py -b vfio-pci <PCI_ADDR>`)
 - Display available (X11 or direct display for Holoviz)
 
+**CUDA architectures:** The CMakeLists.txt compiles CUDA kernels for sm_90
+(Hopper), sm_120, and sm_121 (Blackwell/Thor). If running on a different GPU,
+update `CUDA_ARCHITECTURES` in `cpp/CMakeLists.txt`. Kernels will silently fail
+with `cudaErrorUnsupportedPtxVersion` (error 222) if the target architecture is
+missing.
+
 ## Build Instructions
 
 ### Step 1: Build and enter the networking container
@@ -58,6 +64,7 @@ Edit `hitek9081.yaml` before running. Key parameters:
 | `hsb.data_port` | YAML | UDP destination port (must match flow rule `udp_dst`) |
 | `daqiri.cfg.interfaces[].address` | YAML | NIC PCI BDF (e.g., `0002:01:00.0`) |
 | `hitek9081_rx.num_antennas` | YAML | Number of antennas in the packet (currently 1) |
+| `hitek9081_rx.iq_format` | YAML | IQ packing from FPGA: 0=pair-interleaved `[I,Q,I,Q,...]`, 1=block-4 `[IIII,QQQQ,...]` |
 | `spectral.iq_swap` | YAML | IQ ordering: 0=I,Q as-is, 1=swap Q,I, 2=I,Q conjugate (negate Q) |
 | `spectral.db_min` / `db_max` | YAML | Display dBFS range (e.g., -130 to -6) |
 
@@ -130,6 +137,25 @@ Holoviz opens a window showing the FFT magnitude spectrum:
 - Window title shows frequency range, bandwidth, and averaging count
 
 Press `Ctrl+C` to stop. DAQIRI statistics print on exit.
+
+## IQ Format
+
+The JESD data converter can output samples in two packing formats. The
+`hitek9081_rx.iq_format` YAML parameter selects the decode mode in the GPU
+gather kernel (`gather_iq_kernel` in `spectral_kernels.cu`):
+
+| iq_format | Source layout (per group of 4 samples) | Description |
+|-----------|----------------------------------------|-------------|
+| 0 | `[I0,Q0,I1,Q1,I2,Q2,I3,Q3]` | Pair-interleaved (each sample is adjacent I,Q) |
+| 1 | `[I0,I1,I2,I3,Q0,Q1,Q2,Q3]` | Block-interleaved (4 I values followed by 4 Q values) |
+
+Both modes output contiguous pair-interleaved `[I,Q,I,Q,...]` int16 into the
+GPU accumulation buffer. SpectralOp consumes this format directly — no change
+needed downstream when switching `iq_format`.
+
+The `spectral.iq_swap` parameter is applied later in the FFT pipeline
+(DC block + window kernel) and handles phase/sign conventions independent of
+the packing format.
 
 ## FFT Averaging
 

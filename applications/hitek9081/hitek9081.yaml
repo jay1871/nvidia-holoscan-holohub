@@ -111,6 +111,7 @@ hitek9081_rx:
   interface_name: "hsb_rx_port"
   gpu_direct: false
   batch_size: 2048
+  iq_format: 1                  # 0=pair-interleaved [I,Q,I,Q,...], 1=block-4 [IIII,QQQQ,...]
 
 # =============================================================================
 # SpectralOp — FFT + Averaging + Magnitude (GPU DSP)
@@ -122,7 +123,7 @@ hitek9081_rx:
 # passed to both hitek9081_rx and spectral operators — no need to duplicate here.
 #
 spectral:
-  iq_swap: 2                    # 0=I,Q as-is  1=swap Q,I  2=I,Q conjugate (negate Q)
+  iq_swap: 0                    # 0=I,Q as-is  1=swap Q,I  2=I,Q conjugate (negate Q)
   db_min: -130.0                # Display floor in dBFS
   db_max: -6.0                 # Display ceiling in dBFS (0 dBFS = full scale)
 
