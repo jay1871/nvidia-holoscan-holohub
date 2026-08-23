@@ -98,14 +98,12 @@ class SpectralOp : public Operator {
     power_accum_d_.resize(A, nullptr);
     mag_d_.resize(A, nullptr);
     coords_d_.resize(A, nullptr);
-    dc_mean_d_.resize(A, nullptr);
 
     for (int a = 0; a < A; a++) {
       cudaMalloc(&power_accum_d_[a], N * sizeof(float));
       cudaMemsetAsync(power_accum_d_[a], 0, N * sizeof(float), stream_);
       cudaMalloc(&mag_d_[a], N * sizeof(float));
       cudaMalloc(&coords_d_[a], N * 2 * sizeof(float));
-      cudaMalloc(&dc_mean_d_[a], 2 * sizeof(float));
     }
 
     // Batched fp32 FFT plan: all antennas in a single cufftXtExec call.
@@ -150,14 +148,8 @@ class SpectralOp : public Operator {
         const auto& tensor = it->second;
         const int16_t* iq_ptr = static_cast<const int16_t*>(tensor->data());
 
-        // Pass 1: parallel reduction to compute DC mean
-        cudaMemsetAsync(dc_mean_d_[a], 0, 2 * sizeof(float), stream_);
-        dc_mean_int16(iq_ptr, dc_mean_d_[a], N, iq_swap_.get(), stream_);
-
-        // Pass 2: subtract DC mean + window + convert to float2
-        apply_window_dcblock_int16_to_float2(iq_ptr, window_d_, dc_mean_d_[a],
-                                             fft_in_d_ + a * N,
-                                             N, iq_swap_.get(), stream_);
+        apply_window_int16_to_float2(iq_ptr, window_d_, fft_in_d_ + a * N,
+                                     N, iq_swap_.get(), stream_);
       }
 
       // Single batched FFT for all antennas
@@ -326,7 +318,6 @@ class SpectralOp : public Operator {
       if (power_accum_d_[a]) cudaFree(power_accum_d_[a]);
       if (mag_d_[a]) cudaFree(mag_d_[a]);
       if (coords_d_[a]) cudaFree(coords_d_[a]);
-      if (dc_mean_d_[a]) cudaFree(dc_mean_d_[a]);
     }
     if (stream_) cudaStreamDestroy(stream_);
   }
@@ -344,7 +335,6 @@ class SpectralOp : public Operator {
   std::vector<float*> power_accum_d_;
   std::vector<float*> mag_d_;
   std::vector<float*> coords_d_;
-  std::vector<float*> dc_mean_d_;
 
   // Static display elements
   float* ticks_d_ = nullptr;

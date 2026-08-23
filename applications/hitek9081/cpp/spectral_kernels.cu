@@ -187,6 +187,43 @@ void apply_window_dcblock_int16_to_float2(const int16_t* in, const float* window
 }
 
 // ============================================================================
+// Window + int16→float2 (no DC subtraction)
+// ============================================================================
+
+__global__ void window_int16_to_float2_kernel(const int16_t* in, const float* window,
+                                              float2* out, int num_samples, int iq_swap) {
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i < num_samples) {
+    float w = window[i];
+    float first  = static_cast<float>(in[2 * i]);
+    float second = static_cast<float>(in[2 * i + 1]);
+
+    float val_i, val_q;
+    if (iq_swap == 1) {
+      val_i = second;
+      val_q = first;
+    } else if (iq_swap == 2) {
+      val_i = first;
+      val_q = -second;
+    } else {
+      val_i = first;
+      val_q = second;
+    }
+
+    out[i].x = val_i * w;
+    out[i].y = val_q * w;
+  }
+}
+
+void apply_window_int16_to_float2(const int16_t* in, const float* window, float2* out,
+                                  int num_samples, int iq_swap, cudaStream_t stream) {
+  int threads = 256;
+  int blocks = (num_samples + threads - 1) / threads;
+  window_int16_to_float2_kernel<<<blocks, threads, 0, stream>>>(
+      in, window, out, num_samples, iq_swap);
+}
+
+// ============================================================================
 // Accumulate linear power from float2 FFT output (for FFT averaging)
 // ============================================================================
 
@@ -231,6 +268,33 @@ void magnitude_db_fftshift_f32(const float2* in, float* out, int n,
   int threads = 256;
   int blocks = (n + threads - 1) / threads;
   magnitude_db_fftshift_f32_kernel<<<blocks, threads, 0, stream>>>(in, out, n, reverse);
+}
+
+// ============================================================================
+// Interpolate DC bin (cosmetic) — fills the fftshifted DC region with neighbors
+// ============================================================================
+
+__global__ void interpolate_dc_kernel(float* data, int n, int half_width) {
+  int center = n / 2;
+  int lo = center - half_width - 1;
+  int hi = center + half_width + 1;
+  if (lo < 0) lo = 0;
+  if (hi >= n) hi = n - 1;
+  float neighbor_avg = (data[lo] + data[hi]) * 0.5f;
+  int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  int bin = center - half_width + idx;
+  if (idx <= 2 * half_width && bin >= 0 && bin < n) {
+    // Only fill if the bin is significantly below neighbors (DC notch).
+    // If there's a real signal at DC, leave it alone.
+    if (data[bin] < neighbor_avg - 6.0f) {
+      data[bin] = neighbor_avg;
+    }
+  }
+}
+
+void interpolate_dc_bin(float* data, int n, int half_width, cudaStream_t stream) {
+  int count = 2 * half_width + 1;
+  interpolate_dc_kernel<<<1, count, 0, stream>>>(data, n, half_width);
 }
 
 // ============================================================================
@@ -286,4 +350,53 @@ void gather_iq_from_batch(const void* src, int16_t* dst,
   gather_iq_kernel<<<blocks, threads, 0, stream>>>(
       static_cast<const uint8_t*>(src), dst,
       num_pkts, samples_per_pkt, stride_bytes, dst_sample_offset, iq_format);
+}
+
+// ============================================================================
+// Scatter-gather: read IQ from an array of per-packet pointers (zero-copy path)
+//
+// Each pkt_ptrs[i] points directly into DAQIRI's host_pinned buffer pool.
+// On unified-memory systems (DGX Spark), GPU kernels can dereference these
+// pointers without any cudaMemcpy — CPU and GPU share the same LPDDR5 RAM.
+// ============================================================================
+
+__global__ void gather_iq_scattered_kernel(
+    void* const* pkt_ptrs, int16_t* dst,
+    int num_pkts, int samples_per_pkt,
+    int dst_sample_offset, int iq_format) {
+  int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  int total_samples = num_pkts * samples_per_pkt;
+  if (idx >= total_samples) return;
+
+  int pkt = idx / samples_per_pkt;
+  int sample_in_pkt = idx % samples_per_pkt;
+
+  const int16_t* pkt_data = static_cast<const int16_t*>(pkt_ptrs[pkt]);
+
+  int16_t i_val, q_val;
+
+  if (iq_format == 1) {
+    int group = sample_in_pkt / 4;
+    int pos   = sample_in_pkt % 4;
+    i_val = pkt_data[group * 8 + pos];
+    q_val = pkt_data[group * 8 + pos + 4];
+  } else {
+    i_val = pkt_data[sample_in_pkt * 2];
+    q_val = pkt_data[sample_in_pkt * 2 + 1];
+  }
+
+  int dst_idx = (dst_sample_offset + idx) * 2;
+  dst[dst_idx] = i_val;
+  dst[dst_idx + 1] = q_val;
+}
+
+void gather_iq_from_scattered(void* const* pkt_ptrs, int16_t* dst,
+                              int num_pkts, int samples_per_pkt,
+                              int dst_sample_offset, int iq_format,
+                              cudaStream_t stream) {
+  int total_samples = num_pkts * samples_per_pkt;
+  int threads = 256;
+  int blocks = (total_samples + threads - 1) / threads;
+  gather_iq_scattered_kernel<<<blocks, threads, 0, stream>>>(
+      pkt_ptrs, dst, num_pkts, samples_per_pkt, dst_sample_offset, iq_format);
 }

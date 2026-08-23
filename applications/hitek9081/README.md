@@ -9,8 +9,8 @@ the spectrum in real-time via Holoviz.
 ```
 Hitek9081RxOp ──→ SpectralOp ──→ HolovizOp
 (DPDK RX,          (window, FFT,    (line plot per antenna)
- raw IQ out)        averaging,
-      │             magnitude)
+ zero-copy          averaging,
+ scatter-gather)    magnitude)
       │
       └──→ DDCOp (placeholder: narrowband extraction for ML inference)
 ```
@@ -18,14 +18,15 @@ Hitek9081RxOp ──→ SpectralOp ──→ HolovizOp
 1. **Hololink bringup** — discovers the FPGA, starts the control plane, resets to a known state, configures HTK JESD via HPS
 2. **DAQIRI init** — configures DPDK, binds the NIC, programs hardware flow rules
 3. **FPGA dataplane programming** — tells the FPGA the host MAC/IP/port so it starts streaming
-4. **Holoscan pipeline** — Hitek9081RxOp receives packets and emits raw IQ; SpectralOp computes FFT + averaging on GPU; Holoviz displays
+4. **Holoscan pipeline** — Hitek9081RxOp receives packets via zero-copy scatter-gather; SpectralOp computes FFT + averaging on GPU; Holoviz displays
 
 ## Requirements
 
-- DGX Spark or system with ConnectX NIC and NVIDIA GPU
+- DGX Spark or system with ConnectX NIC and NVIDIA GPU (unified memory required for zero-copy)
 - HSB FPGA connected via ConnectX NIC
 - Hugepages allocated (`echo 2048 > /proc/sys/vm/nr_hugepages`)
 - NIC bound to DPDK (`dpdk-devbind.py -b vfio-pci <PCI_ADDR>`)
+- Isolated CPU cores for DPDK RX (see [Scaling to Higher Data Rates](#scaling-to-higher-data-rates))
 - Display available (X11 or direct display for Holoviz)
 
 **CUDA architectures:** The CMakeLists.txt compiles CUDA kernels for sm_90
@@ -55,24 +56,23 @@ cd ~/holohub
 
 Edit `hitek9081.yaml` before running. Key parameters:
 
-| Parameter | Location | Description |
-|-----------|----------|-------------|
-| `hsb.hololink_ip` | YAML | HSB FPGA data-plane IP address |
-| `hsb.payload_size` | YAML | FPGA payload bytes per packet (from pcap RETH DMA_len) |
-| `hsb.mtu` | YAML | Max RoCE packet payload in bytes (must be >= payload_size, max 4096) |
-| `hsb.custom_header_size` | YAML | Bytes before IQ data in payload (0 if pure IQ) |
-| `hsb.data_port` | YAML | UDP destination port (must match flow rule `udp_dst`) |
-| `daqiri.cfg.interfaces[].address` | YAML | NIC PCI BDF (e.g., `0002:01:00.0`) |
-| `hitek9081_rx.num_antennas` | YAML | Number of antennas in the packet (currently 1) |
-| `hitek9081_rx.iq_format` | YAML | IQ packing from FPGA: 0=pair-interleaved `[I,Q,I,Q,...]`, 1=block-4 `[IIII,QQQQ,...]` |
-| `spectral.iq_swap` | YAML | IQ ordering: 0=I,Q as-is, 1=swap Q,I, 2=I,Q conjugate (negate Q) |
-| `spectral.db_min` / `db_max` | YAML | Display dBFS range (e.g., -130 to -6) |
+| Parameter | Description |
+|-----------|-------------|
+| `hsb.hololink_ip` | HSB FPGA data-plane IP address |
+| `hsb.payload_size` | FPGA payload bytes per packet (from pcap RETH DMA_len) |
+| `hsb.mtu` | Max RoCE packet payload in bytes (must be >= payload_size, max 4096) |
+| `hsb.custom_header_size` | Bytes before IQ data in payload (0 if pure IQ) |
+| `hsb.data_port` | UDP destination port (must match flow rule `udp_dst`) |
+| `daqiri.cfg.interfaces[].address` | NIC PCI BDF (e.g., `0002:01:00.0`) |
+| `hitek9081_rx.batch_size` | Packets per processing batch (tune for latency vs overhead) |
+| `hitek9081_rx.iq_format` | IQ packing: 0=pair-interleaved, 1=block-4 |
+| `spectral.iq_swap` | IQ ordering: 0=I,Q as-is, 1=swap Q,I, 2=conjugate (negate Q) |
+| `spectral.db_min` / `db_max` | Display dBFS range |
 
 The following are **computed automatically** from the above and logged at startup:
 - `max_packet_size` = 70 + payload_size + 4 (total Ethernet frame size)
 - `header_size` = 70 + custom_header_size (bytes before IQ data in the frame)
 - `samples_per_antenna` = (payload_size - custom_header_size) / (num_antennas × 4)
-- `pkt_pages` = ceil(min(mtu, payload_size) / 128) (DP_PACKET_SIZE register value)
 
 ## Run Instructions
 
@@ -82,20 +82,11 @@ The following are **computed automatically** from the above and logged at startu
   --sr <sample_rate_MHz> --center-freq <center_freq_MHz> [options]
 ```
 
-Example:
-
-```bash
-./build/hitek9081/applications/hitek9081/cpp/hitek9081 \
-  /workspace/holohub/applications/hitek9081/hitek9081.yaml \
-  --sr 245.76 --center-freq 750.0 --fft-size 65536 \
-  --freq-min 700.0 --freq-max 800.0 --num-averages 1
-```
-
 **Required arguments:**
 
 | Flag | Description |
 |------|-------------|
-| `--sr MHz` | Sample rate in MHz (e.g., 245.76) |
+| `--sr MHz` | Sample rate in MHz (e.g., 245.76 or 983.04) |
 | `--center-freq MHz` | Center frequency in MHz (e.g., 750) |
 
 **Optional arguments:**
@@ -109,15 +100,15 @@ Example:
 | `--hololink IP` | Override FPGA IP from YAML | from YAML |
 | `-h`, `--help` | Show usage | — |
 
-**Example (full band):**
+**Example (full band at 983.04 MSPS):**
 
 ```bash
 ./build/hitek9081/applications/hitek9081/cpp/hitek9081 \
   /workspace/holohub/applications/hitek9081/hitek9081.yaml \
-  --sr 245.76 --center-freq 750 --fft-size 65536 --num-averages 8
+  --sr 983.04 --center-freq 750 --fft-size 32768 --num-averages 4
 ```
 
-**Example (zoomed to a sub-band):**
+**Example (zoomed sub-band at 245.76 MSPS):**
 
 ```bash
 ./build/hitek9081/applications/hitek9081/cpp/hitek9081 \
@@ -126,23 +117,147 @@ Example:
   --freq-min 700 --freq-max 800
 ```
 
-## Display Output
+## Zero-Copy Architecture
 
-Holoviz opens a window showing the FFT magnitude spectrum:
-- X-axis: frequency from `freq_min` to `freq_max` (MHz), defaults to full Nyquist band
-- Y-axis: magnitude in dBFS (configurable range via `spectral.db_min`/`spectral.db_max`)
-- Each antenna is a separate colored line (green, cyan, red, yellow)
-- Frequency tick marks at integer-MHz intervals (auto-scaled: 1, 2, 5, 10, 20, 50… MHz steps, capped at 11 ticks)
-- DC offset removed via time-domain mean subtraction (fused into window kernel)
-- Window title shows frequency range, bandwidth, and averaging count
+On DGX Spark, the CPU and GPU share the same LPDDR5 memory. DAQIRI's
+`host_pinned` (`cudaMallocHost`) buffers are directly accessible from GPU
+kernels without any copy operations:
 
-Press `Ctrl+C` to stop. DAQIRI statistics print on exit.
+```
+DAQIRI buffer pool (host_pinned / cudaMallocHost)
+        │
+        │  pointer store (no memcpy)
+        ▼
+h_dev_ptrs[batch][pkt] = payload pointer
+        │
+        │  GPU scatter-gather kernel
+        ▼
+accum_bufs[ring] — contiguous [I,Q,I,Q,...] int16 on GPU
+        │
+        │  emit (D2D copy to output snapshot)
+        ▼
+SpectralOp → Holoviz
+```
+
+This eliminates both the per-packet CPU `memcpy` and the `cudaMemcpyAsync` H2D
+transfer that would be required on discrete GPU systems. Packet buffers are held
+until a CUDA event confirms the GPU kernel has finished reading from them.
+
+## Scaling to Higher Data Rates
+
+Each DAQIRI RX queue is serviced by a single CPU core. On DGX Spark's ARM cores,
+one core can sustain approximately **1.5M packets/sec** of packet inspection and
+pointer storage. At payload_size=3904 this corresponds to ~47 Gbps. The FPGA at
+983.04 MSPS produces ~1.0M pkt/s (~31 Gbps), within a single core's capacity.
+
+To reach higher rates (up to 100 Gbps), add more RX queues pinned to separate
+isolated CPU cores:
+
+### 1. Isolate CPU cores (kernel command line)
+
+```
+isolcpus=16-19
+```
+
+This prevents the kernel scheduler from placing other work on cores 16–19,
+ensuring they are dedicated to DPDK packet reception.
+
+### 2. Add RX queues in `hitek9081.yaml`
+
+Each queue needs its own isolated core. Uncomment the additional queues in the
+DAQIRI config:
+
+```yaml
+queues:
+- name: "rx_q_0"
+  id: 0
+  cpu_core: 16        # isolated core
+  batch_size: 20480
+  memory_regions: ["HSB_RX_CPU"]
+- name: "rx_q_1"
+  id: 1
+  cpu_core: 17        # isolated core
+  batch_size: 20480
+  memory_regions: ["HSB_RX_CPU"]
+- name: "rx_q_2"
+  id: 2
+  cpu_core: 18        # isolated core
+  batch_size: 20480
+  memory_regions: ["HSB_RX_CPU"]
+- name: "rx_q_3"
+  id: 3
+  cpu_core: 19        # isolated core
+  batch_size: 20480
+  memory_regions: ["HSB_RX_CPU"]
+```
+
+### 3. FPGA port striping
+
+The FPGA round-robins packets across N source ports (where N = number of RX
+queues). Each port maps to a dedicated queue via a flow rule. This distributes
+the NIC-to-CPU load across multiple ARM cores — all queues feed into the same
+`compute()` call, which iterates them and funnels packets into a single GPU
+scatter-gather pipeline:
+
+```
+FPGA (100 sources, 983.04 MSPS)
+  │
+  │  packet_counter % 4 → selects source port
+  ▼
+udp_src 12288 ──→ flow rule ──→ rx_q_0 (core 16) ─┐
+udp_src 12289 ──→ flow rule ──→ rx_q_1 (core 17) ─┤
+udp_src 12290 ──→ flow rule ──→ rx_q_2 (core 18) ─┤── compute() drains all queues
+udp_src 12291 ──→ flow rule ──→ rx_q_3 (core 19) ─┘        │
+                                                            ▼
+                                                    GPU scatter-gather
+                                                    (single accum stream)
+```
+
+The queues exist solely to parallelize the CPU-side packet reception across
+multiple ARM cores. The GPU kernel and accumulation logic are unchanged — they
+see one merged stream of packet pointers regardless of how many queues delivered
+them.
+
+YAML flow rules for 4-port striping:
+
+```yaml
+flows:
+- name: "q0_flow"
+  id: 0
+  action: { type: queue, id: 0 }
+  match: { udp_src: 12288, udp_dst: 4096 }
+- name: "q1_flow"
+  id: 1
+  action: { type: queue, id: 1 }
+  match: { udp_src: 12289, udp_dst: 4096 }
+- name: "q2_flow"
+  id: 2
+  action: { type: queue, id: 2 }
+  match: { udp_src: 12290, udp_dst: 4096 }
+- name: "q3_flow"
+  id: 3
+  action: { type: queue, id: 3 }
+  match: { udp_src: 12291, udp_dst: 4096 }
+```
+
+FPGA firmware change: set `source_port = DATA_SOURCE_UDP_PORT + (pkt_count % num_queues)`.
+
+No application code changes are needed — the RX operator already iterates all
+queues in `compute()`.
+
+### Throughput scaling
+
+| Queues | Isolated cores | Approx. max throughput |
+|--------|---------------|----------------------|
+| 1 | 16 | ~47 Gbps (1.5M pkt/s) |
+| 2 | 16, 17 | ~94 Gbps (3.0M pkt/s) |
+| 4 | 16–19 | ~100 Gbps (limited by NIC line rate) |
 
 ## IQ Format
 
 The JESD data converter can output samples in two packing formats. The
 `hitek9081_rx.iq_format` YAML parameter selects the decode mode in the GPU
-gather kernel (`gather_iq_kernel` in `spectral_kernels.cu`):
+scatter-gather kernel:
 
 | iq_format | Source layout (per group of 4 samples) | Description |
 |-----------|----------------------------------------|-------------|
@@ -150,12 +265,10 @@ gather kernel (`gather_iq_kernel` in `spectral_kernels.cu`):
 | 1 | `[I0,I1,I2,I3,Q0,Q1,Q2,Q3]` | Block-interleaved (4 I values followed by 4 Q values) |
 
 Both modes output contiguous pair-interleaved `[I,Q,I,Q,...]` int16 into the
-GPU accumulation buffer. SpectralOp consumes this format directly — no change
-needed downstream when switching `iq_format`.
+GPU accumulation buffer. SpectralOp consumes this format directly.
 
-The `spectral.iq_swap` parameter is applied later in the FFT pipeline
-(DC block + window kernel) and handles phase/sign conventions independent of
-the packing format.
+The `spectral.iq_swap` parameter is applied in the FFT pipeline (window kernel)
+and handles phase/sign conventions independent of the packing format.
 
 ## FFT Averaging
 
@@ -163,91 +276,52 @@ Set `--num-averages N` to average N FFT frames in the **linear power domain**
 before converting to dB. N must be a power of 2, between 1 and 32. This reduces
 noise floor variance by approximately `10*log10(N)` dB.
 
-| num_averages | Noise reduction | Update rate (at 1.08 Mfps, 65536-pt) |
-|-------------|-----------------|---------------------------------------|
-| 1 | none | ~16 fps |
-| 8 | ~9 dB | ~2 fps |
-| 32 | ~15 dB | ~0.5 fps |
+| num_averages | Noise reduction | Update rate (at 1.0 Mfps, 32768-pt) |
+|-------------|-----------------|--------------------------------------|
+| 1 | none | ~30 fps |
+| 4 | ~6 dB | ~7 fps |
+| 8 | ~9 dB | ~4 fps |
+| 32 | ~15 dB | ~1 fps |
 
-## Throughput
+## Display Output
 
-With payload_size=3920 (980 complex IQ samples per packet, samples_per_antenna=980):
+Holoviz opens a window showing the FFT magnitude spectrum:
+- X-axis: frequency from `freq_min` to `freq_max` (MHz), defaults to full Nyquist band
+- Y-axis: magnitude in dBFS (configurable range via `spectral.db_min`/`spectral.db_max`)
+- Each antenna is a separate colored line (green, cyan, red, yellow)
+- Frequency tick marks at integer-MHz intervals (auto-scaled)
+- Hanning window applied before FFT (no DC removal — preserves signals at center frequency)
 
-```
-RX: 1.008 Mfps | 31.50 Gbps (3938 MB/s payload) | 9574400 frames
-```
-
-- **Mfps** — million data frames per second (sensor data packets only)
-- **Gbps** — sensor payload data rate (IQ data only, no headers)
-
-## DDC Path (Placeholder)
-
-The `DDCOp` receives the same raw IQ data as `SpectralOp` via Holoscan's
-graph fan-out. It is currently a no-op that logs periodic receipt messages.
-
-When implemented, it will:
-1. FFT the input block
-2. Extract bins around `center_frequency_hz ± bandwidth_hz/2`
-3. IFFT the sub-band to get narrowband time-domain IQ
-4. Output reduced-rate float32 complex IQ for ML inference
-
-External control is designed via a `DDCConfig` struct that a future gRPC
-service thread will update atomically. The compute() path reads this config
-with zero locking overhead.
+Press `Ctrl+C` to stop. DAQIRI statistics print on exit.
 
 ## Changing the Payload Size
 
-When changing `hsb.payload_size`, verify these fields:
+When changing `hsb.payload_size`, verify:
 
-1. `hsb.payload_size` — FPGA payload bytes per packet (from pcap RETH DMA_len)
-2. `hsb.mtu` — must be >= payload_size to avoid fragmentation (max 4096)
-3. `hsb.custom_header_size` — bytes before IQ data in the payload (0 if none)
-4. `daqiri buf_size` — must be >= 70 + payload_size + 4 + ~128 headroom
+1. `hsb.payload_size` — must match FPGA configuration
+2. `hsb.mtu` — must be >= payload_size (max 4096)
+3. `daqiri buf_size` — must be >= 70 + payload_size + 4 + ~128 headroom
 
-All other RX parameters (`max_packet_size`, `header_size`, `samples_per_antenna`,
-`pkt_pages`) are computed automatically and printed at startup.
-
-### MTU and fragmentation
-
-The Holoscan IP `DP_PACKET_SIZE` register controls the max per-packet payload
-in 128-byte pages. The hololink library's `configure_common()` reads an `"mtu"`
-field from enumeration metadata to compute this value. By default (no `"mtu"` in
-metadata), it falls back to `DEFAULT_MTU` (1500), which yields a 1408-byte
-per-packet cap — causing fragmentation for any payload > 1408 bytes.
-
-`hitek9081` injects `hsb.mtu` from the YAML into the channel metadata
-**before** constructing the `DataChannel`. This ensures `configure_roce()` writes
-the correct `DP_PACKET_SIZE` on the first (and only) VP_MASK enable edge. The
-FPGA hardware latches this register at that moment and does not re-read it on
-subsequent enable cycles — post-hoc register overrides have no effect.
-
-If `mtu >= payload_size`, the entire frame fits in a single RoCE Write Only
-packet (opcode `0x2A`). If `mtu < payload_size`, the FPGA fragments into
-multiple packets (Write First `0x06` + Write Last `0x08`), which the current
-RX operator cannot reassemble — **always set `mtu >= payload_size`**.
-
-The Holoscan IP hardware supports up to 4096 bytes per packet.
+All other RX parameters are computed automatically and printed at startup.
 
 ## Packet Structure Reference
 
 The FPGA sends RoCE v2 framed UDP packets. DAQIRI delivers the full Ethernet
-frame (Ethernet header is NOT stripped):
+frame (header NOT stripped):
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│ Full frame as delivered by DAQIRI (586 bytes for payload_size=512):│
-│   Eth(14) | IP(20) | UDP(8) | BTH(12) | RETH(16) |               │
-│   payload(512) | ICRC(4)                                          │
-│   ╰─── RoCE headers (70) ───╯╰─ payload_size ─╯                  │
+│ Eth(14) | IP(20) | UDP(8) | BTH(12) | RETH(16) | payload | ICRC(4)
+│ ╰──────── RoCE headers (70 bytes) ─────────╯                     │
 ├─────────────────────────────────────────────────────────────────┤
-│ BTH opcodes (at byte offset 42 from buffer start):              │
-│   0x2A = RDMA Write Only        (single-packet data frame)      │
-│   0x2B = RDMA Write Only + Imm  (metadata / frame-complete)     │
-│   0x06 = RDMA Write First       (multi-packet start)            │
-│   0x07 = RDMA Write Middle      (multi-packet continuation)     │
-│   0x08 = RDMA Write Last        (multi-packet final chunk)      │
+│ BTH opcodes (byte offset 42):                                   │
+│   0x2A = RDMA Write Only        (data packet)                   │
+│   0x2B = RDMA Write Only + Imm  (metadata — skipped)            │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-The metadata packet (`0x2B`) is 206 bytes on wire and contains frame number,
-timestamp, and CRC. It is detected and skipped by Hitek9081RxOp.
+## DDC Path (Placeholder)
+
+The `DDCOp` receives the same raw IQ data as `SpectralOp` via Holoscan's
+graph fan-out. Currently a no-op. When implemented, it will extract a
+narrowband signal for downstream ML inference.

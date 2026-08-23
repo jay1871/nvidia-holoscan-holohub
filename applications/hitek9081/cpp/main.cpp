@@ -99,6 +99,7 @@
 #include <iostream>
 #include <sstream>
 #include <string>
+#include <csignal>
 
 #define CudaCheck(FUNC)                                                         \
     {                                                                           \
@@ -141,6 +142,8 @@ struct AppConfig {
 
 class App : public holoscan::Application {
  public:
+  std::shared_ptr<holoscan::BooleanCondition> is_alive;
+
   explicit App(const AppConfig& cfg) : cfg_(cfg) {}
 
   void compose() override {
@@ -158,6 +161,7 @@ class App : public holoscan::Application {
     // =========================================================================
     // Operators
     // =========================================================================
+    this->is_alive = make_condition<BooleanCondition>("is_alive", true);
 
     auto rx = make_operator<ops::Hitek9081RxOp>(
         "hitek9081_rx",
@@ -168,7 +172,7 @@ class App : public holoscan::Application {
         Arg("header_size", cfg_.header_size),
         Arg("samples_per_antenna", cfg_.samples_per_antenna),
         Arg("iq_format", cfg_.iq_format),
-        make_condition<BooleanCondition>("is_alive", true));
+        this->is_alive);
 
     // Compute display bin range from frequency zoom settings.
     double full_bw = cfg_.sr_mhz;
@@ -304,6 +308,16 @@ void print_usage(const char* prog)
 }
 
 bool is_power_of_2(int n) { return n > 0 && (n & (n - 1)) == 0; }
+
+static App* g_active_app = nullptr;
+
+void signalHandler(int signal_num) {
+  if (g_active_app != nullptr) {
+	  std::cerr << "\nctl-c pressed\n";
+	  g_active_app->is_alive->disable_tick();
+  }
+}
+
 
 int main(int argc, char** argv) {
   std::string hololink_ip_override;
@@ -518,16 +532,23 @@ int main(int argc, char** argv) {
   HOLOSCAN_LOG_INFO("FPGA dataplane programmed: port={} payload_size={} page_size={} mtu={} pkt_pages={}",
                     data_port, frame_size, page_size, mtu, pkt_pages);
 
+  std::signal(SIGINT, signalHandler);
+  std::signal(SIGTERM, signalHandler);
+
+
   // -------------------------------------------------------------------------
   // Phase 4: Run Holoscan pipeline
   // -------------------------------------------------------------------------
   auto app = holoscan::make_application<App>(cfg);
   app->config(config_path.string());
+  g_active_app = app.get();
   app->run();
 
   // -------------------------------------------------------------------------
   // Phase 5: Teardown
   // -------------------------------------------------------------------------
+  hololink_channel.unconfigure();
+
   daqiri::print_stats();
   daqiri::shutdown();
   HOLOSCAN_LOG_INFO("DAQIRI shut down.");

@@ -60,6 +60,10 @@ void apply_window_dcblock_int16_to_float2(const int16_t* in, const float* window
                                           int num_samples, int iq_swap,
                                           cudaStream_t stream);
 
+// Window + int16→float2 (no DC subtraction).
+void apply_window_int16_to_float2(const int16_t* in, const float* window, float2* out,
+                                  int num_samples, int iq_swap, cudaStream_t stream);
+
 // Accumulate |FFT[bin]|² from float2 FFT output into fp32 power buffer (fftshifted).
 // in:    float2[n] (FFT output, natural order)
 // accum: float[n] (running sum, fftshifted indexing)
@@ -71,6 +75,10 @@ void accumulate_power_fftshift_f32(const float2* in, float* accum, int n,
 // out: float[n] (dB values, fftshifted)
 void magnitude_db_fftshift_f32(const float2* in, float* out, int n,
                                int reverse, cudaStream_t stream);
+
+// Interpolate DC bin region for cosmetic display (removes DC notch artifact).
+// Replaces bins [n/2 - half_width, n/2 + half_width] with average of neighbors.
+void interpolate_dc_bin(float* data, int n, int half_width, cudaStream_t stream);
 
 // ---- Strided batch gather ----
 
@@ -88,3 +96,10 @@ void gather_iq_from_batch(const void* src, int16_t* dst,
                           int num_pkts, int samples_per_pkt,
                           int stride_bytes, int dst_sample_offset,
                           int iq_format, cudaStream_t stream);
+
+// Zero-copy scatter-gather: reads from per-packet pointers in DAQIRI's buffer pool.
+// pkt_ptrs: array of payload pointers (host_pinned, GPU-accessible on unified memory)
+void gather_iq_from_scattered(void* const* pkt_ptrs, int16_t* dst,
+                              int num_pkts, int samples_per_pkt,
+                              int dst_sample_offset, int iq_format,
+                              cudaStream_t stream);
