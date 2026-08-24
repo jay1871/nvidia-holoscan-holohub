@@ -106,7 +106,7 @@ daqiri:
         #   memory_regions:
         #     - "HSB_RX_CPU"
         flows:
-        - name: "hsb_flow"
+        - name: "hsb_flow_0"
           id: 0
           action:
             type: queue
@@ -114,6 +114,32 @@ daqiri:
           match:
             udp_src: 12288
             udp_dst: 4096
+        # Uncomment to match additional FPGA source ports to queues:
+        # (FPGA must stripe packets: src_port = 12288 + pkt_count % num_queues)
+        # - name: "hsb_flow_1"
+        #   id: 1
+        #   action:
+        #     type: queue
+        #     id: 1
+        #   match:
+        #     udp_src: 12289
+        #     udp_dst: 4096
+        # - name: "hsb_flow_2"
+        #   id: 2
+        #   action:
+        #     type: queue
+        #     id: 2
+        #   match:
+        #     udp_src: 12290
+        #     udp_dst: 4096
+        # - name: "hsb_flow_3"
+        #   id: 3
+        #   action:
+        #     type: queue
+        #     id: 3
+        #   match:
+        #     udp_src: 12291
+        #     udp_dst: 4096
 
 # =============================================================================
 # Hitek9081RxOp — Zero-copy scatter-gather RX
@@ -132,8 +158,9 @@ hitek9081_rx:
 #
 spectral:
   iq_swap: 0                    # 0=I,Q as-is  1=swap Q,I  2=I,Q conjugate (negate Q)
-  db_min: -130.0
-  db_max: -6.0
+  adc_bits: 16                  # ADC resolution
+  db_min: -120.0
+  db_max: -10.0
 
 # =============================================================================
 # DDCOp — Digital Down-Converter (placeholder)

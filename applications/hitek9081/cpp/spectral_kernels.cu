@@ -73,21 +73,22 @@ void normalize_to_coords(const float* in, float* out, int n,
 // Convert accumulated power to dB (finalize averaging)
 // ============================================================================
 
-__global__ void power_to_db_kernel(const float* accum, float* out, int n, int num_averages) {
+__global__ void power_to_db_kernel(const float* accum, float* out, int n, int num_averages,
+                                   float adc_fullscale) {
   int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i < n) {
     float avg_power = accum[i] / static_cast<float>(num_averages);
     if (avg_power < 1e-40f) avg_power = 1e-40f;
-    float ref = (float)n * 32768.0f * 0.5f;
+    float ref = (float)n * adc_fullscale * 0.25f;
     out[i] = 10.0f * log10f(avg_power / (ref * ref));
   }
 }
 
 void power_to_db(const float* accum, float* out, int n, int num_averages,
-                 cudaStream_t stream) {
+                 float adc_fullscale, cudaStream_t stream) {
   int threads = 256;
   int blocks = (n + threads - 1) / threads;
-  power_to_db_kernel<<<blocks, threads, 0, stream>>>(accum, out, n, num_averages);
+  power_to_db_kernel<<<blocks, threads, 0, stream>>>(accum, out, n, num_averages, adc_fullscale);
 }
 
 // ============================================================================
@@ -250,7 +251,7 @@ void accumulate_power_fftshift_f32(const float2* in, float* accum, int n,
 // ============================================================================
 
 __global__ void magnitude_db_fftshift_f32_kernel(const float2* in, float* out, int n,
-                                                 int reverse) {
+                                                 int reverse, float adc_fullscale) {
   int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i < n) {
     int src = reverse ? (n / 2 - i + n) % n : (i + n / 2) % n;
@@ -258,16 +259,16 @@ __global__ void magnitude_db_fftshift_f32_kernel(const float2* in, float* out, i
     float im = in[src].y;
     float mag_sq = re * re + im * im;
     if (mag_sq < 1e-40f) mag_sq = 1e-40f;
-    float ref = (float)n * 32768.0f * 0.5f;
+    float ref = (float)n * adc_fullscale * 0.25f;
     out[i] = 10.0f * log10f(mag_sq / (ref * ref));
   }
 }
 
 void magnitude_db_fftshift_f32(const float2* in, float* out, int n,
-                               int reverse, cudaStream_t stream) {
+                               int reverse, float adc_fullscale, cudaStream_t stream) {
   int threads = 256;
   int blocks = (n + threads - 1) / threads;
-  magnitude_db_fftshift_f32_kernel<<<blocks, threads, 0, stream>>>(in, out, n, reverse);
+  magnitude_db_fftshift_f32_kernel<<<blocks, threads, 0, stream>>>(in, out, n, reverse, adc_fullscale);
 }
 
 // ============================================================================

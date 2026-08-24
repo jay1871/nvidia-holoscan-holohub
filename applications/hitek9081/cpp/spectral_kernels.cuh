@@ -43,7 +43,7 @@ void normalize_to_coords(const float* in, float* out, int n,
 // accum: float[n] (accumulated power sum)
 // out:   float[n] (magnitude in dB)
 void power_to_db(const float* accum, float* out, int n, int num_averages,
-                 cudaStream_t stream);
+                 float adc_fullscale, cudaStream_t stream);
 
 // ---- Batched fp32 FFT pipeline kernels ----
 
@@ -74,7 +74,7 @@ void accumulate_power_fftshift_f32(const float2* in, float* accum, int n,
 // in:  float2[n] (FFT output, natural order)
 // out: float[n] (dB values, fftshifted)
 void magnitude_db_fftshift_f32(const float2* in, float* out, int n,
-                               int reverse, cudaStream_t stream);
+                               int reverse, float adc_fullscale, cudaStream_t stream);
 
 // Interpolate DC bin region for cosmetic display (removes DC notch artifact).
 // Replaces bins [n/2 - half_width, n/2 + half_width] with average of neighbors.

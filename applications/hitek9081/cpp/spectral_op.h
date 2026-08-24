@@ -71,6 +71,7 @@ class SpectralOp : public Operator {
     spec.param(bin_start_, "bin_start", "Display start bin", "First FFT bin to display", 0);
     spec.param(bin_end_, "bin_end", "Display end bin", "Last FFT bin to display (0=all)", 0);
     spec.param(iq_swap_, "iq_swap", "IQ swap", "Swap I/Q (0=I first, 1=Q first)", 0);
+    spec.param(adc_bits_, "adc_bits", "ADC bits", "ADC resolution in bits (e.g., 12, 14, 16)", 12);
     spec.param(freq_tick_positions_, "freq_tick_positions", "Frequency tick positions",
                "Normalized [0,1] x-positions for frequency grid lines", std::vector<float>{});
   }
@@ -80,6 +81,7 @@ class SpectralOp : public Operator {
 
     const int N = fft_size_.get();
     const int A = num_antennas_.get();
+    adc_fullscale_ = static_cast<float>(1 << (adc_bits_.get() - 1));
 
     resolved_bin_start_ = bin_start_.get();
     resolved_bin_end_ = (bin_end_.get() == 0) ? N : bin_end_.get();
@@ -161,7 +163,7 @@ class SpectralOp : public Operator {
         if (num_avg > 1) {
           accumulate_power_fftshift_f32(fft_a, power_accum_d_[a], N, 0, stream_);
         } else {
-          magnitude_db_fftshift_f32(fft_a, mag_d_[a], N, 0, stream_);
+          magnitude_db_fftshift_f32(fft_a, mag_d_[a], N, 0, adc_fullscale_, stream_);
           normalize_to_coords(mag_d_[a], coords_d_[a], N, db_min_.get(), db_max_.get(), resolved_bin_start_, resolved_bin_end_, 0, stream_);
         }
       }
@@ -171,7 +173,7 @@ class SpectralOp : public Operator {
       if (num_avg > 1 && avg_count_ >= num_avg) {
         // Finalize averaging
         for (int a = 0; a < A; a++) {
-          power_to_db(power_accum_d_[a], mag_d_[a], N, num_avg, stream_);
+          power_to_db(power_accum_d_[a], mag_d_[a], N, num_avg, adc_fullscale_, stream_);
           normalize_to_coords(mag_d_[a], coords_d_[a], N, db_min_.get(), db_max_.get(), resolved_bin_start_, resolved_bin_end_, 0, stream_);
           // Reset accumulator for next averaging window
           cudaMemsetAsync(power_accum_d_[a], 0, N * sizeof(float), stream_);
@@ -364,7 +366,9 @@ class SpectralOp : public Operator {
   Parameter<int> bin_start_;
   Parameter<int> bin_end_;
   Parameter<int> iq_swap_;
+  Parameter<int> adc_bits_;
   Parameter<std::vector<float>> freq_tick_positions_;
+  float adc_fullscale_ = 2048.0f;
 };
 
 }  // namespace holoscan::ops
