@@ -80,6 +80,10 @@ void magnitude_db_fftshift_f32(const float2* in, float* out, int n,
 // Replaces bins [n/2 - half_width, n/2 + half_width] with average of neighbors.
 void interpolate_dc_bin(float* data, int n, int half_width, cudaStream_t stream);
 
+// Peak-downsample: reduce in_bins to out_bins (peak per stride). Reads from in+bin_offset.
+void downsample_peak(const float* in, float* out, int in_bins, int out_bins,
+                     int bin_offset, cudaStream_t stream);
+
 // ---- Strided batch gather ----
 
 // Gather IQ samples from a strided batch buffer into a contiguous accumulation buffer.

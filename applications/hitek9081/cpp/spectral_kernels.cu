@@ -299,6 +299,34 @@ void interpolate_dc_bin(float* data, int n, int half_width, cudaStream_t stream)
 }
 
 // ============================================================================
+// Peak-downsample: reduce N bins to out_bins by taking max per stride
+// ============================================================================
+
+__global__ void downsample_peak_kernel(const float* in, float* out,
+                                       int in_bins, int out_bins, int bin_offset, int stride) {
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= out_bins) return;
+
+  int start = bin_offset + i * stride;
+  int end = start + stride;
+  if (end > bin_offset + in_bins) end = bin_offset + in_bins;
+
+  float peak = in[start];
+  for (int j = start + 1; j < end; j++) {
+    if (in[j] > peak) peak = in[j];
+  }
+  out[i] = peak;
+}
+
+void downsample_peak(const float* in, float* out, int in_bins, int out_bins,
+                     int bin_offset, cudaStream_t stream) {
+  int stride = (in_bins + out_bins - 1) / out_bins;
+  int threads = 256;
+  int blocks = (out_bins + threads - 1) / threads;
+  downsample_peak_kernel<<<blocks, threads, 0, stream>>>(in, out, in_bins, out_bins, bin_offset, stride);
+}
+
+// ============================================================================
 // Gather IQ from strided batch into contiguous accumulation buffer
 //
 // iq_format:

@@ -104,6 +104,8 @@ The following are **computed automatically** from the above and logged at startu
 | `--freq-min MHz` | Display minimum frequency in MHz | center - sr/2 |
 | `--freq-max MHz` | Display maximum frequency in MHz | center + sr/2 |
 | `--hololink IP` | Override FPGA IP from YAML | from YAML |
+| `--imgui` | Use ImGui/ImPlot display instead of Holoviz | Holoviz |
+| `--waterfall` | Waterfall spectrogram mode (implies `--imgui`) | FFT line |
 | `-h`, `--help` | Show usage | — |
 
 **Example (full band at 983.04 MSPS):**
@@ -121,6 +123,15 @@ The following are **computed automatically** from the above and logged at startu
   /workspace/holohub/applications/hitek9081/hitek9081.yaml \
   --sr 245.76 --center-freq 750 --fft-size 65536 --num-averages 8 \
   --freq-min 700 --freq-max 800
+```
+
+**Example (ImGui with waterfall):**
+
+```bash
+./build/hitek9081/applications/hitek9081/cpp/hitek9081 \
+  /workspace/holohub/applications/hitek9081/hitek9081.yaml \
+  --sr 983.04 --center-freq 750 --fft-size 32768 --num-averages 4 \
+  --freq-min 700 --freq-max 800 --waterfall
 ```
 
 ## Zero-Copy Architecture
@@ -299,6 +310,48 @@ Holoviz opens a window showing the FFT magnitude spectrum:
 - Hanning window applied before FFT (no DC removal — preserves signals at center frequency)
 
 Press `Ctrl+C` to stop. DAQIRI statistics print on exit.
+
+## ImGui Display (`--imgui`)
+
+When `--imgui` is specified, an ImGui/ImPlot window replaces Holoviz:
+
+- Per-antenna FFT plots stacked vertically (left panel, 70% width)
+- DDC selection panel on the right (30% width) with 2 slots
+- Left-click drag on any antenna plot to select a frequency range
+- Selected range appears as a zoomed FFT in the DDC panel
+- Shows: source antenna, center frequency, bandwidth, bin range
+
+### Waterfall mode (`--waterfall`)
+
+Replaces line plots with a scrolling spectrogram:
+- X-axis: frequency (MHz)
+- Y-axis: time (newest at top)
+- Color: power level mapped via Viridis colormap (db_min to db_max)
+- Left-click drag still works for DDC frequency selection
+
+### Performance
+
+The ImGui path uses GPU-accelerated downsampling:
+- `downsample_peak` CUDA kernel reduces FFT bins (e.g., 32768 → 2048) on GPU
+- Only 8 KB per antenna transferred to CPU (vs 128 KB without downsampling)
+- Render thread is decoupled from pipeline via lock-free quad-buffer
+- Display updates at native refresh rate independent of FFT data rate
+
+## Code Architecture
+
+```
+spectral_pipeline.h    — Pure DSP: window → FFT → magnitude (no display deps)
+holoviz_output.h       — Holoviz adapter: grid overlays + coord normalization
+spectral_op.h          — Thin Holoscan wrapper routing DSP → display adapter
+imgui_display.h/cpp    — ImGui render thread (no CUDA deps)
+imgui_sink_op.h        — Bridge: GPU→CPU copy + push to ImGui thread
+hitek9081_rx_op.h      — Zero-copy DPDK RX (no display deps)
+spectral_kernels.cu    — All CUDA kernels (DSP + display helpers)
+```
+
+The DSP pipeline (`spectral_pipeline.h`) has no dependencies on any display
+framework and can be reused independently for headless processing, GnuRadio
+integration, or alternative GUIs.
 
 ## Changing the Payload Size
 

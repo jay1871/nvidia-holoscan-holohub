@@ -80,6 +80,10 @@
 #include "hitek9081_rx_op.h"
 #include "spectral_op.h"
 #include "ddc_op.h"
+#ifdef HAS_IMGUI
+#include "imgui_display.h"
+#include "imgui_sink_op.h"
+#endif
 
 #include <holoscan/holoscan.hpp>
 #include <holoscan/operators/holoviz/holoviz.hpp>
@@ -129,6 +133,8 @@ struct AppConfig {
   int iq_swap = 1;
 
   int iq_format = 1;  // 0=pair-interleaved [I,Q,I,Q,...], 1=block-4 [IIII,QQQQ,...]
+  bool use_imgui = false;
+  bool waterfall = false;
 
   // Computed from hsb.payload_size, hsb.custom_header_size, num_antennas
   uint16_t max_packet_size = 1482;
@@ -143,6 +149,9 @@ struct AppConfig {
 class App : public holoscan::Application {
  public:
   std::shared_ptr<holoscan::BooleanCondition> is_alive;
+#ifdef HAS_IMGUI
+  std::shared_ptr<ImGuiDisplay> imgui_display_;
+#endif
 
   explicit App(const AppConfig& cfg) : cfg_(cfg) {}
 
@@ -182,6 +191,8 @@ class App : public holoscan::Application {
     if (bin_start < 0) bin_start = 0;
     if (bin_end > cfg_.fft_size) bin_end = cfg_.fft_size;
 
+    int num_bins = bin_end - bin_start;
+
     auto spectral = make_operator<ops::SpectralOp>(
         "spectral",
         from_config("spectral"),
@@ -190,54 +201,75 @@ class App : public holoscan::Application {
         Arg("num_antennas", cfg_.num_antennas),
         Arg("bin_start", bin_start),
         Arg("bin_end", bin_end),
+        Arg("output_mode", cfg_.use_imgui ? 1 : 0),
         Arg("freq_tick_positions", cfg_.tick_x_norm));
 
     auto ddc = make_operator<ops::DDCOp>(
         "ddc",
         from_config("ddc"));
 
-    // --- Holoviz display configuration ---
-    auto input_specs = buildGridSpecs();
+    // =========================================================================
+    // Display: ImGui or Holoviz
+    // =========================================================================
+#ifdef HAS_IMGUI
+    if (cfg_.use_imgui) {
+      int display_bins = (num_bins > 2048) ? 2048 : num_bins;
 
-    // Antenna spectrum lines
-    std::vector<std::vector<float>> colors = {
-        {0.0f, 1.0f, 0.0f, 1.0f},   // antenna 0: green
-        {0.0f, 1.0f, 1.0f, 1.0f},   // antenna 1: cyan
-        {1.0f, 0.0f, 0.0f, 1.0f},   // antenna 2: red
-        {1.0f, 1.0f, 0.0f, 1.0f},   // antenna 3: yellow
-    };
-    for (int a = 0; a < cfg_.num_antennas; a++) {
-      std::string name = "antenna_" + std::to_string(a);
-      ops::HolovizOp::InputSpec spec(name, ops::HolovizOp::InputType::LINE_STRIP);
-      spec.color_ = colors[a % colors.size()];
-      spec.line_width_ = 2.0f;
-      input_specs.push_back(spec);
+      ImGuiDisplay::Config disp_cfg{};
+      disp_cfg.freq_min_mhz = cfg_.freq_min_mhz;
+      disp_cfg.freq_max_mhz = cfg_.freq_max_mhz;
+      disp_cfg.center_freq_mhz = cfg_.center_freq_mhz;
+      disp_cfg.db_min = cfg_.db_min;
+      disp_cfg.db_max = cfg_.db_max;
+      disp_cfg.num_antennas = cfg_.num_antennas;
+      disp_cfg.num_bins = display_bins;
+      disp_cfg.waterfall_mode = cfg_.waterfall;
+
+      imgui_display_ = std::make_shared<ImGuiDisplay>(disp_cfg);
+
+      auto imgui_sink = make_operator<ops::ImGuiSinkOp>(
+          "imgui_sink",
+          Arg("num_antennas", cfg_.num_antennas),
+          Arg("num_bins", display_bins));
+      imgui_sink->set_display(imgui_display_);
+
+      add_flow(rx, spectral, {{"iq_out", "iq_in"}});
+      add_flow(spectral, imgui_sink, {{"out", "in"}});
+    } else
+#endif
+    {
+      auto input_specs = buildGridSpecs();
+
+      std::vector<std::vector<float>> colors = {
+          {0.0f, 1.0f, 0.0f, 1.0f},
+          {0.0f, 1.0f, 1.0f, 1.0f},
+          {1.0f, 0.0f, 0.0f, 1.0f},
+          {1.0f, 1.0f, 0.0f, 1.0f},
+      };
+      for (int a = 0; a < cfg_.num_antennas; a++) {
+        std::string name = "antenna_" + std::to_string(a);
+        ops::HolovizOp::InputSpec spec(name, ops::HolovizOp::InputType::LINE_STRIP);
+        spec.color_ = colors[a % colors.size()];
+        spec.line_width_ = 2.0f;
+        input_specs.push_back(spec);
+      }
+
+      double disp_bw = cfg_.freq_max_mhz - cfg_.freq_min_mhz;
+      char title[512];
+      snprintf(title, sizeof(title),
+               "HTK9081 Spectrum | %.2f to %.2f MHz | BW=%.2f MHz | avg=%d",
+               cfg_.freq_min_mhz, cfg_.freq_max_mhz, disp_bw, cfg_.num_averages);
+
+      auto viz = make_operator<ops::HolovizOp>(
+          "holoviz",
+          Arg("tensors", input_specs),
+          Arg("window_title", std::string(title)),
+          Arg("width", static_cast<uint32_t>(1920)),
+          Arg("height", static_cast<uint32_t>(1080)));
+
+      add_flow(rx, spectral, {{"iq_out", "iq_in"}});
+      add_flow(spectral, viz, {{"out", "receivers"}});
     }
-
-    // Window title
-    double disp_bw = cfg_.freq_max_mhz - cfg_.freq_min_mhz;
-    char title[512];
-    snprintf(title, sizeof(title),
-             "HTK9081 Spectrum | %.2f to %.2f MHz | BW=%.2f MHz | avg=%d",
-             cfg_.freq_min_mhz, cfg_.freq_max_mhz, disp_bw, cfg_.num_averages);
-
-    auto viz = make_operator<ops::HolovizOp>(
-        "holoviz",
-        Arg("tensors", input_specs),
-        Arg("window_title", std::string(title)),
-        Arg("width", static_cast<uint32_t>(1920)),
-        Arg("height", static_cast<uint32_t>(1080)));
-
-    // =========================================================================
-    // Pipeline wiring
-    // =========================================================================
-    add_flow(rx, spectral, {{"iq_out", "iq_in"}});
-    add_flow(spectral, viz, {{"out", "receivers"}});
-
-    // DDCOp is a placeholder — don't wire it into the pipeline until it has
-    // a real consumer, otherwise it back-pressures iq_out and kills the pipeline.
-    // Future: add_flow(rx, ddc, {{"iq_out", "iq_in"}});
-    // Future: add_flow(ddc, ml_inference, {{"iq_out", "iq_in"}});
   }
 
  private:
@@ -334,6 +366,8 @@ int main(int argc, char** argv) {
       {"num-averages", required_argument, nullptr, 0},
       {"freq-min", required_argument, nullptr, 0},
       {"freq-max", required_argument, nullptr, 0},
+      {"imgui", no_argument, nullptr, 0},
+      {"waterfall", no_argument, nullptr, 0},
       {0, 0, nullptr, 0}};
 
   while (true) {
@@ -358,6 +392,11 @@ int main(int argc, char** argv) {
         cfg.freq_min_mhz = std::stod(optarg);
       } else if (name == "freq-max") {
         cfg.freq_max_mhz = std::stod(optarg);
+      } else if (name == "imgui") {
+        cfg.use_imgui = true;
+      } else if (name == "waterfall") {
+        cfg.waterfall = true;
+        cfg.use_imgui = true;
       }
     } else if (c == 'h') {
       print_usage(argv[0]);
