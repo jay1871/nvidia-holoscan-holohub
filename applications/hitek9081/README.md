@@ -37,16 +37,22 @@ missing.
 
 ## Build Instructions
 
-### Step 1: Build and enter the networking container
+### Step 1: Build the container image
 
 ```bash
 cd ~/holohub
+./holohub build-container hitek9081 --language cpp
+```
+
+### Step 2: Enter the container
+
+```bash
 ./holohub run-container hitek9081 \
   --language cpp \
   --docker-opts="-u root --privileged -w /workspace/holohub/"
 ```
 
-### Step 2: Build the application inside the container - in holohub directory
+### Step 3: Build the application inside the container
 
 ```bash
 ./holohub build hitek9081 --language=cpp --parallel $(($(nproc)-1))
