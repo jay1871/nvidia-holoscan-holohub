@@ -94,6 +94,7 @@ class SpectralPipeline {
 
   bool has_new_result() const { return new_result_; }
   float* mag_gpu(int antenna) const { return mag_d_[antenna]; }
+  float2* fft_out_gpu(int antenna) const { return fft_out_d_ + antenna * N_; }
   int fft_size() const { return N_; }
   int num_antennas() const { return A_; }
   cudaStream_t stream() const { return stream_; }

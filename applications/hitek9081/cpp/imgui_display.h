@@ -29,6 +29,8 @@ class ImGuiDisplay {
   void submit_frame(int antenna, const float* db_data, int num_bins);
   void frame_complete();
   bool should_close() const;
+  void update_classification(int slot, int class_id, float confidence,
+                             const int* top3_ids, const float* top3_conf);
 
  private:
   void render_loop();
@@ -36,7 +38,8 @@ class ImGuiDisplay {
   void render_ddc_panel();
   void render_line_plot(int antenna, float width, float height);
   void render_waterfall_plot(int antenna, float width, float height);
-  void handle_selection(int antenna, double xmin, double xmax);
+  void handle_selection(int antenna, double center_freq);
+  void update_slot_zoom(int slot);
 
   static constexpr int NUM_BUFS = 4;
 
@@ -62,23 +65,51 @@ class ImGuiDisplay {
   static constexpr int NUM_DDC_SLOTS = 2;
 
   struct DDCSlot {
-    bool active = false;
+    bool active = false;        // has a zoom selection
+    bool ddc_running = false;   // DDC activated with a preset BW
     int antenna = 0;
-    double freq_min_mhz = 0;
+    double freq_min_mhz = 0;   // zoom view range (from drag)
     double freq_max_mhz = 0;
-    double center_mhz = 0;
-    int bin_start = 0;
+    double center_mhz = 0;     // center of drag
+    double ddc_bw_mhz = 0;     // selected preset bandwidth (0 = not selected)
+    int bin_start = 0;          // zoom view bins
     int bin_end = 0;
+    int bw_selection_idx = -1;  // index into BW_PRESETS
+    // Classification results
+    int class_id = -1;
+    float confidence = 0.0f;
+    float top3_confidence[3] = {};
+    int top3_ids[3] = {};
   };
+
+  struct BWPreset {
+    const char* label;
+    double bw_mhz;
+  };
+  static constexpr BWPreset BW_PRESETS[] = {
+    {"12.5 kHz",  0.0125},
+    {"25 kHz",    0.025},
+    {"200 kHz",   0.2},
+    {"1.4 MHz",   1.4},
+    {"3 MHz",     3.0},
+    {"5 MHz",     5.0},
+    {"10 MHz",    10.0},
+    {"15 MHz",    15.0},
+    {"20 MHz",    20.0},
+    {"40 MHz",    40.0},
+    {"50 MHz",    50.0},
+    {"80 MHz",    80.0},
+    {"100 MHz",   100.0},
+    {"160 MHz",   160.0},
+  };
+  static constexpr int NUM_BW_PRESETS = sizeof(BW_PRESETS) / sizeof(BW_PRESETS[0]);
   std::array<DDCSlot, NUM_DDC_SLOTS> ddc_slots_;
   int next_slot_ = 0;
 
-  // Drag state for manual frequency selection
-  bool dragging_ = false;
-  int drag_antenna_ = -1;
-  double drag_start_freq_ = 0;
-  double drag_rect_ymin_ = 0;
-  double drag_rect_ymax_ = 0;
+ public:
+  const DDCSlot& get_ddc_slot(int s) const { return ddc_slots_[s]; }
+ private:
+
 
   // Current frame's read index (set once per render frame)
   int cur_read_idx_ = -1;

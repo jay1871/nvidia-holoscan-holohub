@@ -32,8 +32,11 @@
 #include "spectral_pipeline.h"
 #include "spectral_kernels.cuh"
 #include "holoviz_output.h"
+#include "ddc_channel.h"
+#include "amc_inference.h"
 #include <dlpack/dlpack.h>
 #include <vector>
+#include <array>
 #include <string>
 
 namespace holoscan::ops {
@@ -66,6 +69,8 @@ class SpectralOp : public Operator {
     spec.param(adc_bits_, "adc_bits", "ADC bits", "ADC resolution in bits", 16);
     spec.param(output_mode_, "output_mode", "Output mode",
                "0=normalized coords for Holoviz, 1=raw dB floats for ImGui", 0);
+    spec.param(amc_model_path_, "amc_model_path", "AMC model path",
+               "Path to ONNX model for modulation classification", std::string(""));
     spec.param(freq_tick_positions_, "freq_tick_positions", "Frequency tick positions",
                "Normalized [0,1] x-positions for frequency grid lines", std::vector<float>{});
   }
@@ -106,6 +111,18 @@ class SpectralOp : public Operator {
       }
     }
 
+    // Initialize AMC inference if model path provided.
+    // Engine compilation blocks here if no cached .engine file exists.
+    if (!amc_model_path_.get().empty()) {
+      HOLOSCAN_LOG_INFO("Initializing AMC inference (may take 30-60s on first run)...");
+      if (amc_inference_.initialize(amc_model_path_.get(), 4096)) {
+        HOLOSCAN_LOG_INFO("AMC inference engine ready: {}", amc_model_path_.get());
+      } else {
+        HOLOSCAN_LOG_WARN("AMC model failed to load: {} — classification disabled",
+                          amc_model_path_.get());
+      }
+    }
+
     HOLOSCAN_LOG_INFO("SpectralOp::initialize() — fft={} antennas={} averages={} dB=[{},{}] "
                       "iq_swap={} bins=[{},{}] mode={}",
                       N, A, num_averages_.get(), db_min_.get(), db_max_.get(),
@@ -131,6 +148,19 @@ class SpectralOp : public Operator {
       }
       pipeline_.process(iq_ptrs, valid);
       if (pipeline_.has_new_result()) has_result_ = true;
+
+      // Process active DDC channels on raw IQ + run AMC classification
+      for (int s = 0; s < NUM_DDC_SLOTS; s++) {
+        if (ddc_channels_[s].is_active()) {
+          int ant = ddc_channels_[s].antenna();
+          if (ant < A && iq_ptrs[ant]) {
+            ddc_channels_[s].process(iq_ptrs[ant], pipeline_.stream());
+            if (amc_inference_.is_ready()) {
+              amc_inference_.infer(ddc_channels_[s]);
+            }
+          }
+        }
+      }
     }
 
     if (has_result_) {
@@ -141,6 +171,13 @@ class SpectralOp : public Operator {
       }
     }
   }
+
+  // DDC channel access — called from ImGui sink to activate/deactivate
+  static constexpr int NUM_DDC_SLOTS = 2;
+  DDCChannel& ddc_channel(int slot) { return ddc_channels_[slot]; }
+  const DDCChannel& ddc_channel(int slot) const { return ddc_channels_[slot]; }
+
+  void deactivate_ddc(int slot) { ddc_channels_[slot].deactivate(); }
 
  private:
   void emit_raw_db(OutputContext& op_output) {
@@ -185,6 +222,12 @@ class SpectralOp : public Operator {
   // DSP core (owns FFT, window, magnitude buffers)
   SpectralPipeline pipeline_;
 
+  // DDC channels (up to 2 simultaneous)
+  std::array<DDCChannel, NUM_DDC_SLOTS> ddc_channels_;
+
+  // AMC modulation classifier
+  AMCInference amc_inference_;
+
   // Display adapters
   HolovizOutput holoviz_output_;
 
@@ -211,6 +254,7 @@ class SpectralOp : public Operator {
   Parameter<int> iq_swap_;
   Parameter<int> adc_bits_;
   Parameter<int> output_mode_;
+  Parameter<std::string> amc_model_path_;
   Parameter<std::vector<float>> freq_tick_positions_;
 };
 

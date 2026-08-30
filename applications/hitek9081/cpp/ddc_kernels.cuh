@@ -1,53 +1,55 @@
 /*
  * SPDX-FileCopyrightText: Copyright (c) 2025-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- * http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
  */
 
 #pragma once
 
 #include <cuda_runtime.h>
-#include <cufft.h>
 #include <cstdint>
 
-// =============================================================================
-// DDC (Digital Down-Converter) CUDA Kernels — PLACEHOLDER
-// =============================================================================
-//
-// Future algorithm:
-//   1. FFT the input block (reuse cuFFT plan, same fft_size as spectral path)
-//   2. Circular-shift to move center_frequency to DC (baseband)
-//   3. Zero bins outside ±bandwidth/2 (brick-wall filter in freq domain)
-//      OR: multiply by a raised-cosine window for smoother rolloff
-//   4. IFFT the sub-band → narrowband time-domain IQ
-//   5. Decimate by ratio = fft_size / num_extracted_bins
-//   6. Output: float32 complex IQ at reduced sample rate
-//
-// Performance considerations:
-//   - At ~16 Hz input rate (65536-pt blocks), even a full FFT+IFFT is trivial
-//   - Can batch multiple antennas into a single cufftPlanMany call
-//   - Overlap-save method could be used for continuous streaming without gaps
-// =============================================================================
+// NCO mix: multiply int16 IQ by complex exponential to shift freq_offset_hz to DC.
+// in:    int16_t[n*2] interleaved I,Q
+// out:   float2[n] complex baseband
+// freq_offset_normalized: offset / sample_rate (cycles per sample)
+void ddc_nco_mix(const int16_t* in, float2* out, int n,
+                 double freq_offset_normalized, double phase_start,
+                 cudaStream_t stream);
 
-// Extract frequency bins around a center bin, applying a window for rolloff.
-// in:       cufftComplex[fft_size] (FFT output, not fftshifted)
-// out:      cufftComplex[num_bins] (extracted sub-band, shifted to baseband)
-// center_bin: which bin corresponds to the desired center frequency
-// num_bins:   number of bins to extract (= bandwidth / bin_resolution)
-// fft_size:   total FFT length
-//
-// STUB — not yet implemented.
-void ddc_extract_subband(const cufftComplex* in, cufftComplex* out,
-                         int center_bin, int num_bins, int fft_size,
-                         cudaStream_t stream);
+// Lowpass FIR filter (complex in, complex out).
+// Applies real-valued FIR taps to complex signal.
+// in:    float2[n]
+// out:   float2[n]
+// taps:  float[num_taps] (symmetric FIR, pre-uploaded to GPU)
+void ddc_fir_filter(const float2* in, float2* out, int n,
+                    const float* taps, int num_taps, cudaStream_t stream);
+
+// Decimate: pick every decim_factor-th sample.
+// in:    float2[n]
+// out:   float2[n / decim_factor]
+void ddc_decimate(const float2* in, float2* out, int n, int decim_factor,
+                  cudaStream_t stream);
+
+// Tile src[src_len] into dst[dst_len] by repeating (wrapping).
+void ddc_tile_to_length(const float2* src, float2* dst, int src_len, int dst_len,
+                        cudaStream_t stream);
+
+// Normalize complex IQ to unit power (divide by RMS).
+void ddc_normalize_power(float2* data, int n, cudaStream_t stream);
+
+// Deinterleave float2 → separate I/Q channels for TensorRT: [I0,I1,...,Q0,Q1,...]
+void ddc_deinterleave_iq(const float2* src, float* dst, int n, cudaStream_t stream);
+
+// Compute magnitude spectrogram from complex IQ for 2D CNN input.
+// in:       float2[n_iq] complex IQ samples
+// out:      float[spec_time * spec_freq] normalized magnitude spectrogram
+// window:   float[win_len] pre-computed Hanning window (win_len = spec_freq * 2)
+void ddc_compute_spectrogram(const float2* in, float* out, int n_iq,
+                             const float* window, int win_len,
+                             int spec_time, int spec_freq,
+                             cudaStream_t stream);
+
+// Generate lowpass FIR taps (windowed sinc) on GPU.
+// cutoff_normalized: cutoff_freq / sample_rate (0 to 0.5)
+void ddc_generate_lowpass_taps(float* taps, int num_taps, float cutoff_normalized,
+                               cudaStream_t stream);

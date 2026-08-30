@@ -130,6 +130,9 @@ add_executable(hitek9081
   $<$<BOOL:${HITEK9081_IMGUI}>:imgui_display.cpp>
 )
 set_target_properties(hitek9081 PROPERTIES CUDA_ARCHITECTURES "90;120;121")
+find_library(NVINFER_LIB nvinfer PATHS /usr/lib/aarch64-linux-gnu /usr/lib/x86_64-linux-gnu)
+find_library(NVONNXPARSER_LIB nvonnxparser PATHS /usr/lib/aarch64-linux-gnu /usr/lib/x86_64-linux-gnu)
+
 target_link_libraries(hitek9081
   PRIVATE
     holoscan::core
@@ -138,6 +141,8 @@ target_link_libraries(hitek9081
     CUDA::cuda_driver
     CUDA::cufft
     $<$<BOOL:${HITEK9081_IMGUI}>:imgui_lib>
+    ${NVINFER_LIB}
+    ${NVONNXPARSER_LIB}
 )
 if(HITEK9081_IMGUI)
   target_compile_definitions(hitek9081 PRIVATE HAS_IMGUI=1)

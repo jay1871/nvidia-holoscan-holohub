@@ -36,6 +36,44 @@ log = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
 
+def compute_macro_f1(targets: list[int], preds: list[int], num_classes: int) -> float:
+    """Macro-averaged F1 score (no sklearn dependency)."""
+    tp = np.zeros(num_classes)
+    fp = np.zeros(num_classes)
+    fn = np.zeros(num_classes)
+    for t, p in zip(targets, preds):
+        if t == p:
+            tp[t] += 1
+        else:
+            fp[p] += 1
+            fn[t] += 1
+    f1_per_class = np.zeros(num_classes)
+    for c in range(num_classes):
+        prec = tp[c] / (tp[c] + fp[c]) if (tp[c] + fp[c]) > 0 else 0.0
+        rec = tp[c] / (tp[c] + fn[c]) if (tp[c] + fn[c]) > 0 else 0.0
+        f1_per_class[c] = 2 * prec * rec / (prec + rec) if (prec + rec) > 0 else 0.0
+    return float(np.mean(f1_per_class))
+
+
+def compute_per_class_f1(targets: list[int], preds: list[int], num_classes: int) -> np.ndarray:
+    """Per-class F1 scores."""
+    tp = np.zeros(num_classes)
+    fp = np.zeros(num_classes)
+    fn = np.zeros(num_classes)
+    for t, p in zip(targets, preds):
+        if t == p:
+            tp[t] += 1
+        else:
+            fp[p] += 1
+            fn[t] += 1
+    f1 = np.zeros(num_classes)
+    for c in range(num_classes):
+        prec = tp[c] / (tp[c] + fp[c]) if (tp[c] + fp[c]) > 0 else 0.0
+        rec = tp[c] / (tp[c] + fn[c]) if (tp[c] + fn[c]) > 0 else 0.0
+        f1[c] = 2 * prec * rec / (prec + rec) if (prec + rec) > 0 else 0.0
+    return f1
+
+
 # =============================================================================
 # Modulation signal generators
 # =============================================================================
@@ -515,26 +553,36 @@ def plot_training_history(history, output_path):
         matplotlib.use('Agg')
         import matplotlib.pyplot as plt
 
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+        has_f1 = "val_f1" in history and len(history["val_f1"]) > 0
+        ncols = 3 if has_f1 else 2
+        fig, axes = plt.subplots(1, ncols, figsize=(7 * ncols, 5))
 
         epochs = range(1, len(history["train_loss"]) + 1)
 
-        # Loss
-        ax1.plot(epochs, history["train_loss"], 'b-', label='Train Loss')
-        ax1.set_xlabel('Epoch')
-        ax1.set_ylabel('Loss')
-        ax1.set_title('Training Loss')
-        ax1.legend()
-        ax1.grid(True, alpha=0.3)
+        axes[0].plot(epochs, history["train_loss"], 'b-', label='Train Loss')
+        axes[0].set_xlabel('Epoch')
+        axes[0].set_ylabel('Loss')
+        axes[0].set_title('Loss')
+        axes[0].legend()
+        axes[0].grid(True, alpha=0.3)
 
-        # Accuracy
-        ax2.plot(epochs, history["train_acc"], 'b-', label='Train Acc')
-        ax2.plot(epochs, history["val_acc"], 'r-', label='Val Acc')
-        ax2.set_xlabel('Epoch')
-        ax2.set_ylabel('Accuracy (%)')
-        ax2.set_title('Accuracy')
-        ax2.legend()
-        ax2.grid(True, alpha=0.3)
+        axes[1].plot(epochs, history["train_acc"], 'b-', label='Train Acc')
+        axes[1].plot(epochs, history["val_acc"], 'r-', label='Val Acc')
+        axes[1].set_xlabel('Epoch')
+        axes[1].set_ylabel('Accuracy (%)')
+        axes[1].set_title('Accuracy')
+        axes[1].legend()
+        axes[1].grid(True, alpha=0.3)
+
+        if has_f1:
+            f1_epochs = range(1, len(history["val_f1"]) + 1)
+            axes[2].plot(f1_epochs, history["val_f1"], 'g-', label='Macro F1')
+            axes[2].set_xlabel('Epoch')
+            axes[2].set_ylabel('F1 Score')
+            axes[2].set_title('Validation Macro F1')
+            axes[2].set_ylim(0, 1)
+            axes[2].legend()
+            axes[2].grid(True, alpha=0.3)
 
         plt.tight_layout()
         plt.savefig(output_path, dpi=150)
@@ -623,10 +671,12 @@ def train(args):
         train_acc = 100.0 * correct / total
         elapsed = time.time() - t0
 
-        # Validation
+        # Validation + per-class F1
         model.eval()
         val_correct = 0
         val_total = 0
+        all_preds: list[int] = []
+        all_targets: list[int] = []
         with torch.no_grad():
             for data, target in val_loader:
                 data, target = data.to(device), target.to(device)
@@ -634,19 +684,23 @@ def train(args):
                 pred = output.argmax(dim=1)
                 val_correct += pred.eq(target).sum().item()
                 val_total += target.size(0)
+                all_preds.extend(pred.cpu().tolist())
+                all_targets.extend(target.cpu().tolist())
 
         val_acc = 100.0 * val_correct / val_total
+        macro_f1 = compute_macro_f1(all_targets, all_preds, NUM_CLASSES)
 
         # Track history
         history["train_loss"].append(avg_loss)
         history["train_acc"].append(train_acc)
         history["val_acc"].append(val_acc)
+        history.setdefault("val_f1", []).append(macro_f1)
 
         total_elapsed = time.time() - total_start
         eta = total_elapsed / (epoch - start_epoch + 1) * (args.epochs - epoch - 1)
 
-        log.info("Epoch %d/%d | Loss: %.4f | Train: %.1f%% | Val: %.1f%% | %.1fs/epoch | ETA: %.1fh",
-                 epoch + 1, args.epochs, avg_loss, train_acc, val_acc, elapsed, eta / 3600)
+        log.info("Epoch %d/%d | Loss: %.4f | Train: %.1f%% | Val: %.1f%% | F1: %.3f | %.1fs | ETA: %.1fh",
+                 epoch + 1, args.epochs, avg_loss, train_acc, val_acc, macro_f1, elapsed, eta / 3600)
 
         if val_acc > best_acc:
             best_acc = val_acc
@@ -663,6 +717,14 @@ def train(args):
     total_time = time.time() - total_start
     log.info("Training complete. Best val: %.1f%% | Time: %.2fh | Checkpoint: %s",
              best_acc, total_time / 3600, args.checkpoint)
+
+    # Final per-class F1 report
+    if all_preds and all_targets:
+        per_class = compute_per_class_f1(all_targets, all_preds, NUM_CLASSES)
+        log.info("Per-class F1 (final epoch):")
+        for c in range(NUM_CLASSES):
+            log.info("  %12s  F1=%.3f", MODULATION_CLASSES[c], per_class[c])
+        log.info("  %12s  F1=%.3f", "MACRO", float(np.mean(per_class)))
 
     # Save training plot
     plot_path = args.checkpoint.replace(".pt", "_training.png")

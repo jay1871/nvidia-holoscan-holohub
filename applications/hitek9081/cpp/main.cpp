@@ -98,7 +98,9 @@
 #include <hololink/core/jesd.hpp>
 #include <hololink/core/htk_jesd.hpp>
 
+#include "amc_inference.h"
 #include <filesystem>
+#include <fstream>
 #include <getopt.h>
 #include <iostream>
 #include <sstream>
@@ -232,6 +234,8 @@ class App : public holoscan::Application {
           Arg("num_antennas", cfg_.num_antennas),
           Arg("num_bins", display_bins));
       imgui_sink->set_display(imgui_display_);
+      imgui_sink->set_ddc_channels(&spectral->ddc_channel(0), ops::SpectralOp::NUM_DDC_SLOTS);
+      imgui_sink->set_signal_params(cfg_.sr_mhz, cfg_.center_freq_mhz, cfg_.fft_size);
 
       add_flow(rx, spectral, {{"iq_out", "iq_in"}});
       add_flow(spectral, imgui_sink, {{"out", "in"}});
@@ -540,6 +544,30 @@ int main(int argc, char** argv) {
   hololink->start();
   HOLOSCAN_LOG_INFO("Resetting hololink...");
   hololink->reset();
+
+  // -------------------------------------------------------------------------
+  // Phase 1.5: Pre-build TensorRT engine (before DAQIRI starts)
+  // -------------------------------------------------------------------------
+  {
+    std::string amc_model = yaml["spectral"]["amc_model_path"].as<std::string>("");
+    if (!amc_model.empty()) {
+      std::string engine_path = amc_model.substr(0, amc_model.rfind('.')) + ".engine";
+      std::ifstream engine_check(engine_path);
+      if (!engine_check.good()) {
+        HOLOSCAN_LOG_INFO("======================================================");
+        HOLOSCAN_LOG_INFO("TensorRT engine not cached — building now...");
+        HOLOSCAN_LOG_INFO("This is a one-time operation (30-60 seconds on GB10).");
+        HOLOSCAN_LOG_INFO("The FPGA is NOT streaming yet — no packets will be lost.");
+        HOLOSCAN_LOG_INFO("======================================================");
+        AMCInference prebuild;
+        if (prebuild.initialize(amc_model, 4096)) {
+          HOLOSCAN_LOG_INFO("TensorRT engine cached: {}", engine_path);
+        } else {
+          HOLOSCAN_LOG_WARN("TensorRT engine build failed — AMC will be disabled");
+        }
+      }
+    }
+  }
 
   // -------------------------------------------------------------------------
   // Phase 2: DAQIRI init
