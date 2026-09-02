@@ -2,6 +2,7 @@
 
 #include "ddc_channel.h"
 #include "ddc_kernels.cuh"
+#include "amc_constants.h"
 #include <NvInfer.h>
 #include <NvOnnxParser.h>
 #include <cuda_runtime.h>
@@ -15,23 +16,64 @@
 
 class AMCInference {
  public:
-  static constexpr int NUM_CLASSES = 31;
+  static constexpr int NUM_CLASSES = AMC_NUM_CLASSES;
   static constexpr const char* CLASS_NAMES[NUM_CLASSES] = {
-    "OOK", "4PAM", "BPSK", "QPSK", "8PSK", "16PSK",
-    "16QAM", "32QAM", "64QAM", "128QAM", "256QAM", "32PSK",
-    "2FSK", "4FSK", "8FSK", "16FSK",
-    "AM-SSB", "AM-DSB", "FM", "GMSK", "MSK", "OQPSK",
-    "CPFSK", "64PSK",
-    "OFDM-QPSK", "OFDM-16QAM", "OFDM-64QAM", "OFDM-256QAM",
-    "WCDMA", "MC-GSM", "Noise"
+    "ook", "4ask", "8ask", "16ask", "32ask", "64ask",
+    "2fsk", "2gfsk", "2msk", "2gmsk", "4fsk", "4gfsk", "4msk", "4gmsk",
+    "8fsk", "8gfsk", "8msk", "8gmsk", "16fsk", "16gfsk", "16msk", "16gmsk",
+    "bpsk", "qpsk", "8psk", "16psk", "32psk", "64psk",
+    "16qam", "32qam", "32qam_cross", "64qam", "128qam_cross", "256qam",
+    "512qam_cross", "1024qam", "16apsk", "32apsk",
+    "ofdm-64", "ofdm-72", "ofdm-128", "ofdm-180", "ofdm-256", "ofdm-300",
+    "ofdm-512", "ofdm-600", "ofdm-900", "ofdm-1024", "ofdm-1200", "ofdm-2048",
+    "fm", "am-dsb-sc", "am-dsb", "am-lsb", "am-usb",
+    "lfm-data", "lfm-radar", "chirpss", "tone",
+    "adsb-long", "adsb-short", "btle", "gsm", "dvbs2", "dmr", "p25", "lora",
+    "80211a", "zigbee",
+  };
+
+  // Family mapping: class index → family ID.
+  // Indices must match TorchSig signal_lists.py SIGNALS_SHARED_LIST order exactly.
+  enum Family { FAM_OOK=0, FAM_ASK, FAM_FSK, FAM_PSK, FAM_QAM, FAM_OFDM,
+                FAM_FM, FAM_AM, FAM_CHIRP, FAM_TONE, FAM_PROTOCOL, NUM_FAMILIES };
+  static constexpr const char* FAMILY_NAMES[NUM_FAMILIES] = {
+    "OOK", "ASK", "FSK", "PSK", "QAM", "OFDM", "FM", "AM", "CHIRP", "TONE", "PROTOCOL"
+  };
+  static constexpr int CLASS_FAMILY[NUM_CLASSES] = {
+    FAM_OOK,                                                          // ook
+    FAM_ASK, FAM_ASK, FAM_ASK, FAM_ASK, FAM_ASK,                    // 4-64ask
+    FAM_FSK, FAM_FSK, FAM_FSK, FAM_FSK,                             // 2fsk/gfsk/msk/gmsk
+    FAM_FSK, FAM_FSK, FAM_FSK, FAM_FSK,                             // 4fsk/gfsk/msk/gmsk
+    FAM_FSK, FAM_FSK, FAM_FSK, FAM_FSK,                             // 8fsk/gfsk/msk/gmsk
+    FAM_FSK, FAM_FSK, FAM_FSK, FAM_FSK,                             // 16fsk/gfsk/msk/gmsk
+    FAM_PSK, FAM_PSK, FAM_PSK, FAM_PSK, FAM_PSK, FAM_PSK,          // bpsk-64psk
+    FAM_QAM, FAM_QAM, FAM_QAM, FAM_QAM, FAM_QAM, FAM_QAM,        // 16qam-256qam
+    FAM_QAM, FAM_QAM,                                                // 512qam_cross, 1024qam
+    FAM_PSK, FAM_PSK,                                                // 16apsk, 32apsk (amplitude-phase = PSK family)
+    FAM_OFDM, FAM_OFDM, FAM_OFDM, FAM_OFDM, FAM_OFDM, FAM_OFDM,  // ofdm-64 to ofdm-300
+    FAM_OFDM, FAM_OFDM, FAM_OFDM, FAM_OFDM, FAM_OFDM, FAM_OFDM,  // ofdm-512 to ofdm-2048
+    FAM_FM,                                                           // fm
+    FAM_AM, FAM_AM, FAM_AM, FAM_AM,                                  // am variants
+    FAM_CHIRP, FAM_CHIRP, FAM_CHIRP,                                 // lfm-data, lfm-radar, chirpss
+    FAM_TONE,                                                         // tone
+    FAM_PROTOCOL, FAM_PROTOCOL,                                       // adsb-long, adsb-short
+    FAM_PROTOCOL,                                                     // btle
+    FAM_PROTOCOL,                                                     // gsm
+    FAM_PROTOCOL,                                                     // dvbs2
+    FAM_PROTOCOL, FAM_PROTOCOL,                                       // dmr, p25
+    FAM_PROTOCOL,                                                     // lora
+    FAM_PROTOCOL, FAM_PROTOCOL,                                       // 80211a, zigbee
   };
 
   AMCInference() = default;
   ~AMCInference() { destroy(); }
 
+  // STFT dimensions — must match train_amc.py iq_to_spectrogram() parameters
   static constexpr int SPEC_TIME = 128;
   static constexpr int SPEC_FREQ = 64;
 
+  // First call builds TRT engine from ONNX (30-60s on GB10), caches as .engine.
+  // Subsequent calls load cached engine instantly. Delete .engine to force rebuild.
   bool initialize(const std::string& onnx_path, int input_length = 4096) {
     input_length_ = input_length;
 
@@ -103,6 +145,18 @@ class AMCInference {
       result.top3_confidence[i] = sorted_probs[i].first;
     }
 
+    // Family confidence: sum smoothed probabilities per family
+    float family_conf[NUM_FAMILIES] = {};
+    for (int i = 0; i < NUM_CLASSES; i++) {
+      family_conf[CLASS_FAMILY[i]] += ema[i];
+    }
+    int best_family = 0;
+    for (int f = 1; f < NUM_FAMILIES; f++) {
+      if (family_conf[f] > family_conf[best_family]) best_family = f;
+    }
+    result.family_id = best_family;
+    result.family_confidence = family_conf[best_family];
+
     channel.set_classification(result);
   }
 
@@ -165,12 +219,12 @@ class AMCInference {
     if (!context_) return false;
 
     // Spectrogram input buffer [SPEC_TIME * SPEC_FREQ]
-    cudaMalloc(&input_d_, SPEC_TIME * SPEC_FREQ * sizeof(float));
-    cudaMalloc(&output_d_, NUM_CLASSES * sizeof(float));
+    if (cudaMalloc(&input_d_, SPEC_TIME * SPEC_FREQ * sizeof(float)) != cudaSuccess) return false;
+    if (cudaMalloc(&output_d_, NUM_CLASSES * sizeof(float)) != cudaSuccess) return false;
 
     // STFT Hanning window (win_len = SPEC_FREQ * 2)
     int win_len = SPEC_FREQ * 2;
-    cudaMalloc(&stft_window_d_, win_len * sizeof(float));
+    if (cudaMalloc(&stft_window_d_, win_len * sizeof(float)) != cudaSuccess) return false;
     // Generate Hanning window on GPU
     std::vector<float> win(win_len);
     for (int i = 0; i < win_len; i++) {
@@ -236,8 +290,12 @@ class AMCInference {
   int input_length_ = 4096;
   std::unique_ptr<nvinfer1::ICudaEngine> engine_;
   std::unique_ptr<nvinfer1::IExecutionContext> context_;
-  static constexpr float EMA_ALPHA = 0.3f;        // smoothing: 0=frozen, 1=no smoothing
-  static constexpr float HYSTERESIS_MARGIN = 0.05f; // 5% confidence margin to switch class
+  // EMA smoothing: 30% new frame + 70% history. Lower α = more stable, slower response.
+  // Tuned for ~7 Hz FFT frame rate — 0.3 gives ~1s settling time.
+  static constexpr float EMA_ALPHA = 0.3f;
+  // Hysteresis: displayed class only changes if new winner exceeds current by this margin.
+  // Prevents flickering on TDD signals where class confidence oscillates.
+  static constexpr float HYSTERESIS_MARGIN = 0.05f;
 
   float* input_d_ = nullptr;
   float* output_d_ = nullptr;

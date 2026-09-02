@@ -1,6 +1,14 @@
+// Time-domain DDC: NCO mix → FIR lowpass → decimate → normalize.
+// Operates on raw int16 IQ from RxOp (not FFT output).
+// Each channel has its own CUDA stream for independent processing.
+//
+// Thread safety: activate/deactivate called from ImGuiSinkOp (pipeline thread).
+// process() called from SpectralOp::compute() (pipeline thread).
+// classification() read from ImGuiSinkOp (same thread). No cross-thread access.
 #pragma once
 
 #include "ddc_kernels.cuh"
+#include "amc_constants.h"
 #include <cuda_runtime.h>
 #include <cmath>
 
@@ -21,6 +29,8 @@ class DDCChannel {
     float confidence = 0.0f;
     float top3_confidence[3] = {};
     int top3_ids[3] = {};
+    int family_id = -1;
+    float family_confidence = 0.0f;
   };
 
   DDCChannel() = default;
@@ -30,20 +40,23 @@ class DDCChannel {
     if (active_) deactivate();
     cfg_ = cfg;
 
-    // NCO frequency: offset from LO to shift target to DC
+    // NCO: shift target frequency to DC. freq_offset_norm in cycles/sample.
     double offset_mhz = cfg_.center_freq_mhz - cfg_.lo_freq_mhz;
     freq_offset_norm_ = offset_mhz / cfg_.sample_rate_mhz;
 
-    // Decimation factor: sample_rate / bandwidth → gives output at ~bandwidth rate
+    // Nyquist: output rate = bandwidth → decim = sr/bw
     decim_factor_ = std::max(1, static_cast<int>(cfg_.sample_rate_mhz / cfg_.bandwidth_mhz));
 
-    // FIR filter: cutoff at half the DDC bandwidth, normalized to input sample rate
+    // FIR cutoff at half-bandwidth normalized to input rate.
+    // Blackman window gives ~-58 dB stopband for 63-tap filter.
     float cutoff_norm = static_cast<float>(cfg_.bandwidth_mhz / (2.0 * cfg_.sample_rate_mhz));
-    num_taps_ = 63;  // odd-length FIR
+    num_taps_ = 63;
 
     cudaStreamCreate(&stream_);
+    cudaEventCreate(&sync_evt_);
+    // Persistent scratch for ddc_normalize_power — avoids per-frame cudaMalloc
+    cudaMalloc(&power_scratch_d_, sizeof(float));
 
-    // Allocate working buffers at input_length (full frame size)
     int N = cfg_.input_length;
     cudaMalloc(&mixed_d_, N * sizeof(float2));
     cudaMalloc(&filtered_d_, N * sizeof(float2));
@@ -70,27 +83,27 @@ class DDCChannel {
     active_ = false;
     classification_ = ClassificationResult{};
     ema_initialized_ = false;
-    for (int i = 0; i < 31; i++) ema_probs_[i] = 0;
+    for (int i = 0; i < AMC_NUM_CLASSES; i++) ema_probs_[i] = 0;
 
     if (mixed_d_) { cudaFree(mixed_d_); mixed_d_ = nullptr; }
     if (filtered_d_) { cudaFree(filtered_d_); filtered_d_ = nullptr; }
+    if (power_scratch_d_) { cudaFree(power_scratch_d_); power_scratch_d_ = nullptr; }
+    if (sync_evt_) { cudaEventDestroy(sync_evt_); sync_evt_ = nullptr; }
     if (decimated_d_) { cudaFree(decimated_d_); decimated_d_ = nullptr; }
     if (iq_out_d_) { cudaFree(iq_out_d_); iq_out_d_ = nullptr; }
     if (taps_d_) { cudaFree(taps_d_); taps_d_ = nullptr; }
     if (stream_) { cudaStreamDestroy(stream_); stream_ = nullptr; }
   }
 
+  // Process one frame of raw IQ. src_stream is SpectralPipeline's stream —
+  // we wait on it via event to ensure IQ data is committed before reading.
   void process(const int16_t* raw_iq, cudaStream_t src_stream) {
     if (!active_) return;
 
     int N = cfg_.input_length;
 
-    // Wait for IQ data
-    cudaEvent_t evt;
-    cudaEventCreate(&evt);
-    cudaEventRecord(evt, src_stream);
-    cudaStreamWaitEvent(stream_, evt, 0);
-    cudaEventDestroy(evt);
+    cudaEventRecord(sync_evt_, src_stream);
+    cudaStreamWaitEvent(stream_, sync_evt_, 0);
 
     // 1. NCO mix: shift target frequency to DC
     ddc_nco_mix(raw_iq, mixed_d_, N, freq_offset_norm_, nco_phase_, stream_);
@@ -115,7 +128,7 @@ class DDCChannel {
     }
 
     // 5. Normalize to unit power
-    ddc_normalize_power(iq_out_d_, cfg_.output_length, stream_);
+    ddc_normalize_power(iq_out_d_, cfg_.output_length, power_scratch_d_, stream_);
   }
 
   void set_classification(const ClassificationResult& result) { classification_ = result; }
@@ -144,6 +157,8 @@ class DDCChannel {
   int decim_output_len_ = 0;
 
   cudaStream_t stream_ = nullptr;
+  cudaEvent_t sync_evt_ = nullptr;
+  float* power_scratch_d_ = nullptr;  // persistent float[1] for normalize reduction
   float2* mixed_d_ = nullptr;
   float2* filtered_d_ = nullptr;
   float2* decimated_d_ = nullptr;
@@ -151,6 +166,6 @@ class DDCChannel {
   float* taps_d_ = nullptr;
 
   ClassificationResult classification_;
-  float ema_probs_[31] = {};
+  float ema_probs_[AMC_NUM_CLASSES] = {};
   bool ema_initialized_ = false;
 };

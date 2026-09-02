@@ -215,7 +215,8 @@ class App : public holoscan::Application {
     // =========================================================================
 #ifdef HAS_IMGUI
     if (cfg_.use_imgui) {
-      int display_bins = (num_bins > 2048) ? 2048 : num_bins;
+      int display_bins = (num_bins > ops::SpectralOp::MAX_DISPLAY_BINS)
+          ? ops::SpectralOp::MAX_DISPLAY_BINS : num_bins;
 
       ImGuiDisplay::Config disp_cfg{};
       disp_cfg.freq_min_mhz = cfg_.freq_min_mhz;

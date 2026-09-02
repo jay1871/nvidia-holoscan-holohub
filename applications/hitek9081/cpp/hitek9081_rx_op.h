@@ -62,9 +62,10 @@ using namespace daqiri;
 
 namespace holoscan::ops {
 
+// RoCE v2 BTH offsets from buffer start (IBTA spec): Eth(14) + IP(20) + UDP(8) = 42
 static constexpr int BTH_OPCODE_OFFSET = 42;
-static constexpr int BTH_PSN_OFFSET = 50;
-static constexpr uint8_t ROCE_WRITE_ONLY_IMM = 0x2B;
+static constexpr int BTH_PSN_OFFSET = 50;   // BTH byte 8: 24-bit Packet Sequence Number
+static constexpr uint8_t ROCE_WRITE_ONLY_IMM = 0x2B;  // metadata packet — skip
 
 class Hitek9081RxOp : public Operator {
  public:
@@ -256,9 +257,9 @@ class Hitek9081RxOp : public Operator {
   }
 
  private:
-  static constexpr int num_concurrent = 32;
+  static constexpr int num_concurrent = 32;    // max in-flight batches. Sized for 1.5M pkt/s at batch_size=4096
   static constexpr int MAX_BURSTS_PER_BATCH = 256;
-  static constexpr int NUM_ACCUM_BUFS = 32;
+  static constexpr int NUM_ACCUM_BUFS = 32;   // ring depth > num_concurrent to prevent overwrite during GPU read
   static constexpr int NUM_OUTPUT_BUFS = 4;
 
   struct BatchAggregationParams {

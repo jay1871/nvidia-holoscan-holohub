@@ -68,10 +68,10 @@ daqiri:
 
     memory_regions:
     - name: "HSB_RX_CPU"
-      kind: "host_pinned"       # GPU-accessible on unified memory (DGX Spark)
-      affinity: 0
-      num_bufs: 409600
-      buf_size: 8192
+      kind: "host_pinned"       # GPU-accessible on unified memory (DGX Spark). Use "device" for GPUDirect on discrete GPUs.
+      affinity: 0               # NUMA node (DGX Spark has only node 0)
+      num_bufs: 409600          # ~270ms pool at 1.5M pkt/s. Must cover DDC+GPU processing latency.
+      buf_size: 8192            # >= 70 (RoCE hdr) + payload_size + 4 (ICRC) + ~128 (DPDK headroom)
 
     interfaces:
     - name: "hsb_rx_port"
@@ -83,7 +83,7 @@ daqiri:
         - name: "rx_q_0"
           id: 0
           cpu_core: 16          # isolated core
-          batch_size: 20480
+          batch_size: 20480     # DPDK burst size, tuned for ConnectX ring depth
           memory_regions:
             - "HSB_RX_CPU"
         # Uncomment to scale beyond ~1.5M pkt/s (one queue per isolated core):
@@ -112,8 +112,8 @@ daqiri:
             type: queue
             id: 0
           match:
-            udp_src: 12288
-            udp_dst: 4096
+            udp_src: 12288      # FPGA DATA_SOURCE_UDP_PORT (0x3000)
+            udp_dst: 4096       # must match hsb.data_port
         # Uncomment to match additional FPGA source ports to queues:
         # (FPGA must stripe packets: src_port = 12288 + pkt_count % num_queues)
         # - name: "hsb_flow_1"

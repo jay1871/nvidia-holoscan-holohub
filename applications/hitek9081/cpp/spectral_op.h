@@ -173,11 +173,14 @@ class SpectralOp : public Operator {
   }
 
   // DDC channel access — called from ImGui sink to activate/deactivate
-  static constexpr int NUM_DDC_SLOTS = 2;
+  static constexpr int NUM_DDC_SLOTS = 16;
   DDCChannel& ddc_channel(int slot) { return ddc_channels_[slot]; }
   const DDCChannel& ddc_channel(int slot) const { return ddc_channels_[slot]; }
 
   void deactivate_ddc(int slot) { ddc_channels_[slot].deactivate(); }
+
+ public:
+  static constexpr int MAX_DISPLAY_BINS = 2048;
 
  private:
   void emit_raw_db(OutputContext& op_output) {
@@ -222,7 +225,7 @@ class SpectralOp : public Operator {
   // DSP core (owns FFT, window, magnitude buffers)
   SpectralPipeline pipeline_;
 
-  // DDC channels (up to 2 simultaneous)
+  // DDC channels (up to NUM_DDC_SLOTS simultaneous, user-assigned to any antenna)
   std::array<DDCChannel, NUM_DDC_SLOTS> ddc_channels_;
 
   // AMC modulation classifier
@@ -231,8 +234,6 @@ class SpectralOp : public Operator {
   // Display adapters
   HolovizOutput holoviz_output_;
 
-  // GPU downsample for ImGui mode
-  static constexpr int MAX_DISPLAY_BINS = 2048;
   std::vector<float*> ds_d_;
   int ds_out_bins_ = 0;
 

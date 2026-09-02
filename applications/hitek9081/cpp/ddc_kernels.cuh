@@ -35,7 +35,8 @@ void ddc_tile_to_length(const float2* src, float2* dst, int src_len, int dst_len
                         cudaStream_t stream);
 
 // Normalize complex IQ to unit power (divide by RMS).
-void ddc_normalize_power(float2* data, int n, cudaStream_t stream);
+// scratch: pre-allocated float[1] on GPU for power reduction (avoids per-call cudaMalloc).
+void ddc_normalize_power(float2* data, int n, float* scratch, cudaStream_t stream);
 
 // Deinterleave float2 → separate I/Q channels for TensorRT: [I0,I1,...,Q0,Q1,...]
 void ddc_deinterleave_iq(const float2* src, float* dst, int n, cudaStream_t stream);

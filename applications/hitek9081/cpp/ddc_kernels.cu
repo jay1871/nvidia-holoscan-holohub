@@ -10,7 +10,9 @@
 #include <algorithm>
 
 // =============================================================================
-// NCO mix: shift signal to baseband
+// NCO downconversion: multiply by e^{-j2πf_norm·n} to shift target to DC.
+// Negative sign = downconversion convention (positive freq → baseband).
+// Phase accumulates across frames to maintain continuity.
 // =============================================================================
 
 __global__ void nco_mix_kernel(const int16_t* in, float2* out, int n,
@@ -40,34 +42,58 @@ void ddc_nco_mix(const int16_t* in, float2* out, int n,
 }
 
 // =============================================================================
-// FIR lowpass filter (complex signal, real taps)
+// FIR lowpass filter (complex signal, real taps).
+// Uses shared memory tile with halo for input overlap — reduces global reads ~30x.
+// Taps loaded into shared memory once per block (63 floats = 252 bytes).
+// Boundary: truncation at edges (not circular). Acceptable for long signals.
 // =============================================================================
+
+static constexpr int FIR_BLOCK = 256;
+static constexpr int FIR_MAX_TAPS = 127;
 
 __global__ void fir_filter_kernel(const float2* in, float2* out, int n,
                                   const float* taps, int num_taps) {
-  int i = blockIdx.x * blockDim.x + threadIdx.x;
-  if (i >= n) return;
+  __shared__ float s_taps[FIR_MAX_TAPS];
+  __shared__ float2 s_tile[FIR_BLOCK + FIR_MAX_TAPS];  // block + halo
 
+  int tid = threadIdx.x;
+  int gid = blockIdx.x * FIR_BLOCK + tid;
   int half = num_taps / 2;
-  float sum_i = 0, sum_q = 0;
 
+  // Load taps into shared memory (all threads cooperate)
+  if (tid < num_taps) s_taps[tid] = taps[tid];
+  __syncthreads();
+
+  // Load tile: main block + halo on both sides
+  int tile_start = blockIdx.x * FIR_BLOCK - half;
+  int tile_len = FIR_BLOCK + num_taps - 1;
+  for (int i = tid; i < tile_len; i += FIR_BLOCK) {
+    int gi = tile_start + i;
+    if (gi >= 0 && gi < n)
+      s_tile[i] = in[gi];
+    else
+      s_tile[i] = make_float2(0.0f, 0.0f);
+  }
+  __syncthreads();
+
+  if (gid >= n) return;
+
+  float sum_i = 0.0f, sum_q = 0.0f;
   for (int t = 0; t < num_taps; t++) {
-    int idx = i - half + t;
-    if (idx >= 0 && idx < n) {
-      sum_i += in[idx].x * taps[t];
-      sum_q += in[idx].y * taps[t];
-    }
+    float2 val = s_tile[tid + t];
+    float tap = s_taps[t];
+    sum_i += val.x * tap;
+    sum_q += val.y * tap;
   }
 
-  out[i].x = sum_i;
-  out[i].y = sum_q;
+  out[gid].x = sum_i;
+  out[gid].y = sum_q;
 }
 
 void ddc_fir_filter(const float2* in, float2* out, int n,
                     const float* taps, int num_taps, cudaStream_t stream) {
-  int threads = 256;
-  int blocks = (n + threads - 1) / threads;
-  fir_filter_kernel<<<blocks, threads, 0, stream>>>(in, out, n, taps, num_taps);
+  int blocks = (n + FIR_BLOCK - 1) / FIR_BLOCK;
+  fir_filter_kernel<<<blocks, FIR_BLOCK, 0, stream>>>(in, out, n, taps, num_taps);
 }
 
 // =============================================================================
@@ -136,17 +162,17 @@ __global__ void normalize_kernel(float2* data, int n, float inv_rms) {
   data[i].y *= inv_rms;
 }
 
-void ddc_normalize_power(float2* data, int n, cudaStream_t stream) {
-  float* power_d;
-  cudaMalloc(&power_d, sizeof(float));
-  cudaMemsetAsync(power_d, 0, sizeof(float), stream);
+void ddc_normalize_power(float2* data, int n, float* scratch, cudaStream_t stream) {
+  cudaMemsetAsync(scratch, 0, sizeof(float), stream);
 
   int threads = 256;
   int blocks = (n + threads - 1) / threads;
-  compute_power_kernel<<<blocks, threads, 0, stream>>>(data, power_d, n);
+  compute_power_kernel<<<blocks, threads, 0, stream>>>(data, scratch, n);
 
+  // CPU round-trip to read scalar power — unavoidable without a two-kernel device-side approach.
+  // Acceptable at ~7 Hz DDC frame rate; total stall <0.1ms per channel.
   float total_power;
-  cudaMemcpyAsync(&total_power, power_d, sizeof(float), cudaMemcpyDeviceToHost, stream);
+  cudaMemcpyAsync(&total_power, scratch, sizeof(float), cudaMemcpyDeviceToHost, stream);
   cudaStreamSynchronize(stream);
 
   float rms = sqrtf(total_power / n);
@@ -154,7 +180,6 @@ void ddc_normalize_power(float2* data, int n, cudaStream_t stream) {
   float inv_rms = 1.0f / rms;
 
   normalize_kernel<<<blocks, threads, 0, stream>>>(data, n, inv_rms);
-  cudaFree(power_d);
 }
 
 // =============================================================================
@@ -175,7 +200,10 @@ void ddc_deinterleave_iq(const float2* src, float* dst, int n, cudaStream_t stre
 }
 
 // =============================================================================
-// Spectrogram: STFT magnitude for 2D CNN input
+// Spectrogram via per-bin DFT (not FFT). spec_freq=64 bins makes DFT cheaper
+// than cuFFT setup overhead. Each thread computes one (time, freq) bin.
+// Normalization to [0,1] done on CPU — buffer is small (128×64 = 32KB).
+// Must match STFT parameters in train_amc.py (Hanning, 128 time, 64 freq).
 // =============================================================================
 
 __global__ void spectrogram_kernel(const float2* in, float* out, int n_iq,

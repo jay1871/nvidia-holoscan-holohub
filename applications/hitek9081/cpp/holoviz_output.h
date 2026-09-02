@@ -72,6 +72,8 @@ class HolovizOutput {
     out[name] = std::make_shared<holoscan::Tensor>(dl);
   }
 
+  // Holoviz coordinate system: [0,1]×[0,1], origin top-left, Y increases downward.
+  // Grid lines and labels positioned in this normalized space.
   void initGridOverlays() {
     constexpr int NUM_DB_TICKS = 10;
 

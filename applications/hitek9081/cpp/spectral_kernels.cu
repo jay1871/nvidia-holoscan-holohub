@@ -52,7 +52,7 @@ __global__ void normalize_to_coords_kernel(const float* in, float* out,
     if (flip_x) x = 1.0f - x;
     float y = (in[bin_start + i] - db_min) / (db_max - db_min);
     y = fminf(fmaxf(y, 0.0f), 1.0f);
-    y = 1.0f - y;
+    y = 1.0f - y;  // Holoviz Y: 0=top, 1=bottom — invert so dB_max renders at top
     out[2 * i] = x;
     out[2 * i + 1] = y;
   }
@@ -78,7 +78,8 @@ __global__ void power_to_db_kernel(const float* accum, float* out, int n, int nu
   int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i < n) {
     float avg_power = accum[i] / static_cast<float>(num_averages);
-    if (avg_power < 1e-40f) avg_power = 1e-40f;
+    if (avg_power < 1e-40f) avg_power = 1e-40f;  // floor below IEEE denorm to prevent log10(0)
+    // ref = N × fullscale × 0.25: N = FFT processing gain, 0.25 = Hanning coherent gain (0.5) × single-sided (0.5)
     float ref = (float)n * adc_fullscale * 0.25f;
     out[i] = 10.0f * log10f(avg_power / (ref * ref));
   }
@@ -191,6 +192,9 @@ void apply_window_dcblock_int16_to_float2(const int16_t* in, const float* window
 // Window + int16→float2 (no DC subtraction)
 // ============================================================================
 
+// iq_swap: 0=I,Q as-is from ADC
+//          1=swap Q,I (reversed JESD lane mapping)
+//          2=conjugate (negate Q — upper sideband conversion)
 __global__ void window_int16_to_float2_kernel(const int16_t* in, const float* window,
                                               float2* out, int num_samples, int iq_swap) {
   int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -232,6 +236,7 @@ __global__ void accumulate_power_fftshift_f32_kernel(const float2* in, float* ac
                                                      int reverse) {
   int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i < n) {
+    // fftshift: maps natural order (DC at bin 0) to display order (DC at bin N/2)
     int src = reverse ? (n / 2 - i + n) % n : (i + n / 2) % n;
     float re = in[src].x;
     float im = in[src].y;
@@ -254,11 +259,13 @@ __global__ void magnitude_db_fftshift_f32_kernel(const float2* in, float* out, i
                                                  int reverse, float adc_fullscale) {
   int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i < n) {
+    // fftshift: natural order (DC=0) → display order (DC=N/2)
     int src = reverse ? (n / 2 - i + n) % n : (i + n / 2) % n;
     float re = in[src].x;
     float im = in[src].y;
     float mag_sq = re * re + im * im;
-    if (mag_sq < 1e-40f) mag_sq = 1e-40f;
+    if (mag_sq < 1e-40f) mag_sq = 1e-40f;  // floor below IEEE denorm to prevent log10(0)
+    // ref = N × fullscale × 0.25: N = FFT gain, 0.25 = Hanning coherent gain (0.5) × single-sided (0.5)
     float ref = (float)n * adc_fullscale * 0.25f;
     out[i] = 10.0f * log10f(mag_sq / (ref * ref));
   }
@@ -302,13 +309,19 @@ void interpolate_dc_bin(float* data, int n, int half_width, cudaStream_t stream)
 // Peak-downsample: reduce N bins to out_bins by taking max per stride
 // ============================================================================
 
+// Peak (max-hold) downsample — preserves signal peaks in display.
+// Uses float stride so output bins map uniformly to the full input range.
+// This ensures freq_axis[i] = freq_min + i * (freq_max - freq_min) / (out_bins - 1)
+// correctly maps to the downsampled output.
 __global__ void downsample_peak_kernel(const float* in, float* out,
-                                       int in_bins, int out_bins, int bin_offset, int stride) {
+                                       int in_bins, int out_bins, int bin_offset,
+                                       float stride) {
   int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= out_bins) return;
 
-  int start = bin_offset + i * stride;
-  int end = start + stride;
+  int start = bin_offset + static_cast<int>(i * stride);
+  int end = bin_offset + static_cast<int>((i + 1) * stride);
+  if (start >= bin_offset + in_bins) start = bin_offset + in_bins - 1;
   if (end > bin_offset + in_bins) end = bin_offset + in_bins;
 
   float peak = in[start];
@@ -320,7 +333,7 @@ __global__ void downsample_peak_kernel(const float* in, float* out,
 
 void downsample_peak(const float* in, float* out, int in_bins, int out_bins,
                      int bin_offset, cudaStream_t stream) {
-  int stride = (in_bins + out_bins - 1) / out_bins;
+  float stride = static_cast<float>(in_bins) / static_cast<float>(out_bins);
   int threads = 256;
   int blocks = (out_bins + threads - 1) / threads;
   downsample_peak_kernel<<<blocks, threads, 0, stream>>>(in, out, in_bins, out_bins, bin_offset, stride);

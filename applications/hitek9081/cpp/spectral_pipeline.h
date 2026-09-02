@@ -1,3 +1,11 @@
+// Windowed FFT → magnitude pipeline. No display dependencies.
+// Operates entirely on GPU via a dedicated CUDA stream.
+//
+// Pipeline per frame:
+//   int16 IQ → Hanning window → cuFFT (fp32 batched) → |X|² accumulation or dB conversion
+//
+// Averaging accumulates |FFT[k]|² in linear power domain (not dB) to preserve
+// noise statistics. After num_averages frames: 10*log10(accum/N) → dBFS.
 #pragma once
 
 #include "spectral_kernels.cuh"
@@ -15,7 +23,7 @@ class SpectralPipeline {
     int num_antennas = 1;
     int num_averages = 1;
     int adc_bits = 16;
-    int iq_swap = 0;
+    int iq_swap = 0;  // 0=I,Q as-is  1=swap (reversed JESD lanes)  2=conjugate (upper sideband)
   };
 
   SpectralPipeline() = default;
@@ -23,9 +31,9 @@ class SpectralPipeline {
 
   void initialize(const Config& cfg) {
     cfg_ = cfg;
-    N_ = cfg.fft_size;
+    N_ = cfg.fft_size;   // FFT length in complex samples
     A_ = cfg.num_antennas;
-    adc_fullscale_ = static_cast<float>(1 << (cfg.adc_bits - 1));
+    adc_fullscale_ = static_cast<float>(1 << (cfg.adc_bits - 1));  // 2^(bits-1), e.g. 32768 for 16-bit
 
     cudaStreamCreate(&stream_);
 
@@ -33,6 +41,7 @@ class SpectralPipeline {
     generate_hanning_window(window_d_, N_, stream_);
 
     cudaMalloc(&fft_in_d_, A_ * N_ * sizeof(float2));
+    // Natural FFT order: bin 0 = DC. Used by DDC for subband extraction.
     cudaMalloc(&fft_out_d_, A_ * N_ * sizeof(float2));
 
     power_accum_d_.resize(A_, nullptr);
@@ -43,6 +52,8 @@ class SpectralPipeline {
       cudaMalloc(&mag_d_[a], N_ * sizeof(float));
     }
 
+    // Batched FFT: all antennas in one call. fp32 chosen over fp16 because
+    // 16+ butterfly stages at N=65536 exceed fp16's 10-bit mantissa.
     long long int n_ll[1] = {static_cast<long long>(N_)};
     size_t workSize = 0;
     cufftCreate(&fft_plan_);
@@ -69,6 +80,7 @@ class SpectralPipeline {
     for (int a = 0; a < A_; a++) {
       float2* fft_a = fft_out_d_ + a * N_;
       if (num_avg > 1) {
+        // Accumulate |FFT[k]|² — linear power preserves noise statistics for averaging
         accumulate_power_fftshift_f32(fft_a, power_accum_d_[a], N_, 0, stream_);
       } else {
         magnitude_db_fftshift_f32(fft_a, mag_d_[a], N_, 0, adc_fullscale_, stream_);
@@ -93,7 +105,9 @@ class SpectralPipeline {
   }
 
   bool has_new_result() const { return new_result_; }
+  // mag_d_: fftshifted dBFS magnitude. bin 0 = most-negative freq, bin N/2 = DC.
   float* mag_gpu(int antenna) const { return mag_d_[antenna]; }
+  // fft_out_d_: raw FFT in natural order (bin 0 = DC). Used by DDC for subband extraction.
   float2* fft_out_gpu(int antenna) const { return fft_out_d_ + antenna * N_; }
   int fft_size() const { return N_; }
   int num_antennas() const { return A_; }
@@ -111,17 +125,17 @@ class SpectralPipeline {
   }
 
   Config cfg_;
-  int N_ = 0;
-  int A_ = 0;
-  float adc_fullscale_ = 32768.0f;
+  int N_ = 0;  // FFT size (complex samples)
+  int A_ = 0;  // antenna count
+  float adc_fullscale_ = 32768.0f;  // 2^(adc_bits-1), overwritten by initialize()
 
   cudaStream_t stream_ = nullptr;
   cufftHandle fft_plan_ = 0;
   float* window_d_ = nullptr;
   float2* fft_in_d_ = nullptr;
-  float2* fft_out_d_ = nullptr;
-  std::vector<float*> power_accum_d_;
-  std::vector<float*> mag_d_;
+  float2* fft_out_d_ = nullptr;         // natural order (bin 0 = DC)
+  std::vector<float*> power_accum_d_;   // linear |X|² accumulator per antenna
+  std::vector<float*> mag_d_;           // fftshifted dBFS output per antenna
 
   int avg_count_ = 0;
   bool new_result_ = false;

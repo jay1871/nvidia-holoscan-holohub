@@ -19,6 +19,7 @@ class ImGuiSinkOp : public Operator {
   HOLOSCAN_OPERATOR_FORWARD_ARGS(ImGuiSinkOp)
   ImGuiSinkOp() = default;
 
+  // All three setters must be called before first compute(). Order doesn't matter.
   void set_display(std::shared_ptr<ImGuiDisplay> display) { display_ = display; }
   void set_ddc_channels(DDCChannel* channels, int count) {
     ddc_channels_ = channels;
@@ -78,8 +79,10 @@ class ImGuiSinkOp : public Operator {
           ddc_cfg.output_length = 4096;
           ddc_cfg.antenna = slot.antenna;
           ddc_channels_[s].activate(ddc_cfg);
+        // 0.001 MHz epsilon prevents float jitter from triggering DDC retune every frame
         } else if (slot.ddc_running && ddc_channels_[s].is_active() &&
-                   std::abs(ddc_channels_[s].bandwidth_mhz() - slot.ddc_bw_mhz) > 0.001) {
+                   (std::abs(ddc_channels_[s].bandwidth_mhz() - slot.ddc_bw_mhz) > 0.001 ||
+                    std::abs(ddc_channels_[s].center_freq_mhz() - slot.center_mhz) > 0.001)) {
           DDCChannel::Config ddc_cfg;
           ddc_cfg.center_freq_mhz = slot.center_mhz;
           ddc_cfg.lo_freq_mhz = center_freq_mhz_;
@@ -99,7 +102,8 @@ class ImGuiSinkOp : public Operator {
           const auto& result = ddc_channels_[s].classification();
           if (result.class_id >= 0) {
             display_->update_classification(s, result.class_id, result.confidence,
-                                            result.top3_ids, result.top3_confidence);
+                                            result.top3_ids, result.top3_confidence,
+                                            result.family_id, result.family_confidence);
           }
         }
       }
