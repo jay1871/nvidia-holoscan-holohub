@@ -144,6 +144,19 @@ class Hitek9081RxOp : public Operator {
     cached_iq_format_ = iq_format_.get();
     cached_batch_size_ = batch_size_.get();
 
+    for (int a = 0; a < MAX_ANTENNAS; a++) {
+      last_psn_[a] = 0;
+      last_psn_valid_[a] = false;
+      expected_psn_step_ant_[a] = 0;
+      ttl_psn_gaps_ant_[a] = 0;
+      last_report_psn_gaps_ant_[a] = 0;
+      ttl_psn_ooo_ant_[a] = 0;
+      last_report_psn_ooo_ant_[a] = 0;
+    }
+    psn_log_count_ = 0;
+    ttl_psn_gaps_ = 0;
+    last_report_psn_gaps_ = 0;
+
     HOLOSCAN_LOG_INFO("Hitek9081RxOp::initialize() — payload={} batch={} fft={} antennas={} bufs={}",
                       nom_payload_size_, cached_batch_size_, N, A, NUM_ACCUM_BUFS);
   }
@@ -262,8 +275,13 @@ class Hitek9081RxOp : public Operator {
             int32_t delta = static_cast<int32_t>((psn - last_psn_[ant_id]) & 0x00FFFFFF);
             if (delta > 0x007FFFFF) delta -= 0x01000000;
             if (delta > 0) {
-              const int A = cached_num_antennas_;
-              uint32_t missed = (delta / (A > 0 ? A : 1)) - 1;
+              int32_t step = expected_psn_step_ant_[ant_id];
+              if (step <= 0) {
+                // Hitek RoCE increments PSN by 2 per data packet (odd PSNs are metadata packets)
+                step = (delta <= 2) ? delta : 2;
+                expected_psn_step_ant_[ant_id] = step;
+              }
+              int32_t missed = (delta / step) - 1;
               if (missed > 0) {
                 ttl_psn_gaps_++;
                 ttl_psn_gaps_ant_[ant_id]++;
@@ -276,6 +294,11 @@ class Hitek9081RxOp : public Operator {
             last_psn_[ant_id] = psn;
           }
           last_psn_valid_[ant_id] = true;
+
+          if (psn_log_count_ < 16) {
+            HOLOSCAN_LOG_INFO("PSN sample [{}] ant{}: PSN={}", psn_log_count_, ant_id, psn);
+            psn_log_count_++;
+          }
 
           ttl_data_frames_++;
           ttl_payload_bytes_ += payload_len;
@@ -634,6 +657,8 @@ class Hitek9081RxOp : public Operator {
   int cached_batch_size_ = 0;
   uint32_t last_psn_[MAX_ANTENNAS] = {};
   bool last_psn_valid_[MAX_ANTENNAS] = {};
+  int32_t expected_psn_step_ant_[MAX_ANTENNAS] = {};
+  int psn_log_count_ = 0;
   int64_t ttl_psn_gaps_ = 0;
   int64_t ttl_psn_gaps_ant_[MAX_ANTENNAS] = {};
   int raw_dump_samples_[MAX_ANTENNAS] = {};
