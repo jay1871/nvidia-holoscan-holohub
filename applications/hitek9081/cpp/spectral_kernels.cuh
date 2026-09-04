@@ -105,5 +105,6 @@ void gather_iq_from_batch(const void* src, int16_t* dst,
 // pkt_ptrs: array of payload pointers (host_pinned, GPU-accessible on unified memory)
 void gather_iq_from_scattered(void* const* pkt_ptrs, int16_t* dst,
                               int num_pkts, int samples_per_pkt,
-                              int dst_sample_offset, int iq_format,
+                              int dst_sample_offset, int max_dst_samples,
+                              int iq_format,
                               cudaStream_t stream);

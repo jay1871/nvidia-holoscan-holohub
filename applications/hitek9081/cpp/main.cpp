@@ -240,6 +240,7 @@ class App : public holoscan::Application {
       imgui_sink->set_ddc_channels(&spectral->ddc_channel(0), ops::SpectralOp::NUM_DDC_SLOTS);
       imgui_sink->set_signal_params(cfg_.sr_mhz, cfg_.center_freq_mhz, cfg_.fft_size);
 
+      spectral->set_rx_operator(rx.get());
       add_flow(rx, spectral, {{"iq_out", "iq_in"}});
       add_flow(spectral, imgui_sink, {{"out", "in"}});
     } else
@@ -274,6 +275,7 @@ class App : public holoscan::Application {
           Arg("width", static_cast<uint32_t>(1920)),
           Arg("height", static_cast<uint32_t>(1080)));
 
+      spectral->set_rx_operator(rx.get());
       add_flow(rx, spectral, {{"iq_out", "iq_in"}});
       add_flow(spectral, viz, {{"out", "receivers"}});
     }

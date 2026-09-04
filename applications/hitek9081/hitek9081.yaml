@@ -79,19 +79,18 @@ daqiri:
       rx:
         flow_isolation: true
         queues:
-        # Each queue must be on a separate isolated core (isolcpus=16-19)
         - name: "rx_q_0"
           id: 0
           cpu_core: 16          # isolated core
           batch_size: 20480     # DPDK burst size, tuned for ConnectX ring depth
           memory_regions:
             - "HSB_RX_CPU"
-        - name: "rx_q_1"
-          id: 1
-          cpu_core: 17          # isolated core
-          batch_size: 20480
-          memory_regions:
-            - "HSB_RX_CPU"
+        # - name: "rx_q_1"
+        #   id: 1
+        #   cpu_core: 17        # isolated core
+        #   batch_size: 20480
+        #   memory_regions:
+        #     - "HSB_RX_CPU"
         # - name: "rx_q_2"
         #   id: 2
         #   cpu_core: 18        # isolated core
@@ -112,15 +111,6 @@ daqiri:
             id: 0
           match:
             udp_src: 12288      # FPGA DATA_SOURCE_UDP_PORT (0x3000)
-            udp_dst: 4096       # ADC channel 0
-        - name: "hsb_flow_1"
-          id: 1
-          action:
-            type: queue
-            id: 1
-          match:
-            udp_src: 12288
-            udp_dst: 4097       # ADC channel 1
         # Uncomment for 4-channel ADC (set num_antennas: 4):
         # - name: "hsb_flow_2"
         #   id: 2
@@ -146,9 +136,10 @@ daqiri:
 #
 hitek9081_rx:
   interface_name: "hsb_rx_port"
-  batch_size: 4096
+  batch_size: 20480             # match DPDK burst size — one burst = one kernel launch
   num_antennas: 2               # ADC channels (1/2/4)
   iq_format: 1                  # 0=pair-interleaved [I,Q,I,Q,...], 1=block-4 [IIII,QQQQ,...]
+  rx_core: 18                   # dedicated isolated CPU core (isolcpus=16-19)
 
 # =============================================================================
 # SpectralOp — FFT + Averaging + Magnitude (GPU DSP)

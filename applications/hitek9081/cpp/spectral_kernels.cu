@@ -400,10 +400,11 @@ void gather_iq_from_batch(const void* src, int16_t* dst,
 __global__ void gather_iq_scattered_kernel(
     void* const* pkt_ptrs, int16_t* dst,
     int num_pkts, int samples_per_pkt,
-    int dst_sample_offset, int iq_format) {
+    int dst_sample_offset, int max_dst_samples, int iq_format) {
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
   int total_samples = num_pkts * samples_per_pkt;
   if (idx >= total_samples) return;
+  if (dst_sample_offset + idx >= max_dst_samples) return;
 
   int pkt = idx / samples_per_pkt;
   int sample_in_pkt = idx % samples_per_pkt;
@@ -429,11 +430,12 @@ __global__ void gather_iq_scattered_kernel(
 
 void gather_iq_from_scattered(void* const* pkt_ptrs, int16_t* dst,
                               int num_pkts, int samples_per_pkt,
-                              int dst_sample_offset, int iq_format,
+                              int dst_sample_offset, int max_dst_samples,
+                              int iq_format,
                               cudaStream_t stream) {
   int total_samples = num_pkts * samples_per_pkt;
   int threads = 256;
   int blocks = (total_samples + threads - 1) / threads;
   gather_iq_scattered_kernel<<<blocks, threads, 0, stream>>>(
-      pkt_ptrs, dst, num_pkts, samples_per_pkt, dst_sample_offset, iq_format);
+      pkt_ptrs, dst, num_pkts, samples_per_pkt, dst_sample_offset, max_dst_samples, iq_format);
 }

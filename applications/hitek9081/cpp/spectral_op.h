@@ -39,6 +39,8 @@
 #include <array>
 #include <string>
 
+#include "hitek9081_rx_op.h"
+
 namespace holoscan::ops {
 
 class SpectralOp : public Operator {
@@ -135,6 +137,10 @@ class SpectralOp : public Operator {
 
     if (maybe_input) {
       const auto& input = maybe_input.value();
+      // RX operator emits async — GPU-side wait for copies to complete
+      if (rx_op_ && rx_op_->emit_event()) {
+        cudaStreamWaitEvent(pipeline_.stream(), rx_op_->emit_event(), 0);
+      }
       const int A = pipeline_.num_antennas();
       const int16_t* iq_ptrs[4] = {};
       int valid = 0;
@@ -178,6 +184,8 @@ class SpectralOp : public Operator {
   const DDCChannel& ddc_channel(int slot) const { return ddc_channels_[slot]; }
 
   void deactivate_ddc(int slot) { ddc_channels_[slot].deactivate(); }
+
+  void set_rx_operator(Hitek9081RxOp* rx) { rx_op_ = rx; }
 
  public:
   static constexpr int MAX_DISPLAY_BINS = 2048;
@@ -243,6 +251,7 @@ class SpectralOp : public Operator {
   int resolved_num_bins_ = 0;
 
   bool has_result_ = false;
+  Hitek9081RxOp* rx_op_ = nullptr;
 
   // Parameters
   Parameter<int> fft_size_;

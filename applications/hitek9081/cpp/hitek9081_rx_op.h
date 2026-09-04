@@ -44,6 +44,8 @@
 #include <chrono>
 #include <cstdio>
 #include <ctime>
+#include <pthread.h>
+#include <sched.h>
 
 #define CUDA_TRY(stmt)                                                                          \
   ({                                                                                            \
@@ -99,21 +101,20 @@ class Hitek9081RxOp : public Operator {
 
     nom_payload_size_ = max_packet_size_.get() - header_size_.get();
 
-    // Pointer arrays for zero-copy scatter-gather.
-    // On DGX Spark (unified memory), DAQIRI's host_pinned buffers are
-    // GPU-accessible so we store payload pointers directly.
+    // Direct per-antenna pointer arrays per concurrent batch for zero-copy scatter-gather.
+    // Pre-allocating per antenna avoids CPU partitioning loops in the hot path.
     for (int n = 0; n < num_concurrent; n++) {
-      CUDA_TRY(cudaMallocHost((void**)&h_dev_ptrs_[n], sizeof(void*) * batch_size_.get()));
-      CUDA_TRY(cudaMallocHost((void**)&h_pkt_antenna_[n], batch_size_.get()));
+      for (int a = 0; a < MAX_ANTENNAS; a++) {
+        size_t ptr_cap = std::max<size_t>(static_cast<size_t>(batch_size_.get()) * 2, 65536UL);
+        CUDA_TRY(cudaMallocHost((void**)&h_ant_ptrs_[n][a], sizeof(void*) * ptr_cap));
+      }
       cudaEventCreate(&rx_events_[n]);
-    }
-    for (int a = 0; a < MAX_ANTENNAS; a++) {
-      CUDA_TRY(cudaMallocHost((void**)&h_ant_ptrs_[a], sizeof(void*) * batch_size_.get()));
     }
 
     const int N = fft_size_.get();
     const int A = num_antennas_.get();
     cudaStreamCreate(&accum_stream_);
+    cudaEventCreate(&emit_event_);
 
     // Stream warmup — ensures CUDA context is active
     dummy_packet_reorder(NULL, NULL, 1, 1, accum_stream_);
@@ -135,8 +136,16 @@ class Hitek9081RxOp : public Operator {
     }
 
     cudaStreamSynchronize(accum_stream_);
+
+    // Cache Parameter values for hot-path use (avoid per-packet get() overhead)
+    cached_fft_size_ = N;
+    cached_num_antennas_ = A;
+    cached_samples_per_ant_ = samples_per_antenna_.get();
+    cached_iq_format_ = iq_format_.get();
+    cached_batch_size_ = batch_size_.get();
+
     HOLOSCAN_LOG_INFO("Hitek9081RxOp::initialize() — payload={} batch={} fft={} antennas={} bufs={}",
-                      nom_payload_size_, batch_size_.get(), N, A, NUM_ACCUM_BUFS);
+                      nom_payload_size_, cached_batch_size_, N, A, NUM_ACCUM_BUFS);
   }
 
   void setup(OperatorSpec& spec) override {
@@ -163,19 +172,46 @@ class Hitek9081RxOp : public Operator {
                "0=pair-interleaved [I,Q,I,Q,...], 1=block-4 [IIII,QQQQ,...]", 1);
     spec.param<uint32_t>(data_port_, "data_port", "Data port",
                "Base UDP dst port for channel 0", 4096);
+    spec.param<int>(rx_core_, "rx_core", "RX CPU Core",
+               "CPU core to pin RX compute thread to (-1 to disable)", 18);
   }
 
+  cudaEvent_t emit_event() const { return emit_event_; }
+
   void compute(InputContext&, OutputContext& op_output, ExecutionContext&) override {
+    if (!thread_pinned_) {
+      int core = rx_core_.get();
+      if (core >= 0) {
+        cpu_set_t cpuset;
+        CPU_ZERO(&cpuset);
+        CPU_SET(core, &cpuset);
+        if (pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset) == 0) {
+          HOLOSCAN_LOG_INFO("Pinned RX compute thread to isolated Core {}", core);
+        } else {
+          HOLOSCAN_LOG_WARN("Failed to pin RX compute thread to Core {}", core);
+        }
+      }
+      thread_pinned_ = true;
+    }
+
     free_processed_packets();
+
+    // Cache Parameter::get() values — avoid per-packet overhead
+    const uint16_t hdr_size = header_size_.get();
+    const int base_port = static_cast<int>(data_port_.get());
+    const int batch_sz = batch_size_.get();
+    const bool dumping = !dump_ready_ || (dump_ready_ && !dump_done_);
 
     BurstParams* burst;
     const auto num_rx_queues = get_num_rx_queues(port_id_);
 
     pending_emit_ = false;
-    for (int q = 0; q < num_rx_queues; q++) {
-      for (int drain = 0; drain < 8; drain++) {
+    for (int drain = 0; drain < 8; drain++) {
+      bool any_burst = false;
+      for (int q = 0; q < num_rx_queues; q++) {
         auto status = get_rx_burst(&burst, port_id_, q);
-        if (status != Status::SUCCESS) break;
+        if (status != Status::SUCCESS) continue;
+        any_burst = true;
         free_processed_packets();
 
         auto burst_size = get_num_packets(burst);
@@ -197,15 +233,16 @@ class Hitek9081RxOp : public Operator {
             continue;
           }
 
+          // Decode antenna ID directly from UDP destination port (port 4096 = ant0, 4097 = ant1, etc.)
           int ant_id = 0;
           if (pkt_len > UDP_DST_OFFSET + 1) {
             uint16_t udp_dst = (static_cast<uint16_t>(pkt_ptr[UDP_DST_OFFSET]) << 8) |
                                 static_cast<uint16_t>(pkt_ptr[UDP_DST_OFFSET + 1]);
-            ant_id = static_cast<int>(udp_dst) - static_cast<int>(data_port_.get());
+            ant_id = static_cast<int>(udp_dst) - base_port;
             if (ant_id < 0 || ant_id >= MAX_ANTENNAS) ant_id = 0;
           }
 
-          int payload_len = static_cast<int>(pkt_len) - static_cast<int>(header_size_.get());
+          int payload_len = static_cast<int>(pkt_len) - static_cast<int>(hdr_size);
           if (payload_len <= 0 || payload_len > nom_payload_size_) continue;
 
           uint32_t psn = 0;
@@ -213,29 +250,27 @@ class Hitek9081RxOp : public Operator {
             psn = (static_cast<uint32_t>(pkt_ptr[BTH_PSN_OFFSET + 1]) << 16) |
                   (static_cast<uint32_t>(pkt_ptr[BTH_PSN_OFFSET + 2]) << 8) |
                    static_cast<uint32_t>(pkt_ptr[BTH_PSN_OFFSET + 3]);
-            if (psn_log_count_ < 20) {
-              HOLOSCAN_LOG_INFO("PSN sample [{}] ant{}: PSN={}", psn_log_count_, ant_id, psn);
-              psn_log_count_++;
-            }
           }
 
-          dump_raw_samples(pkt_ptr, pkt_len, ant_id);
+          if (dumping) dump_raw_samples(pkt_ptr, pkt_len, ant_id);
 
-          // Direct insertion — no reorder buffer
-          h_dev_ptrs_[cur_batch_idx_][aggr_pkts_recv_] = pkt_ptr + header_size_.get();
-          h_pkt_antenna_[cur_batch_idx_][aggr_pkts_recv_] = static_cast<uint8_t>(ant_id);
+          // Direct placement into per-antenna array for this concurrent batch
+          h_ant_ptrs_[cur_batch_idx_][ant_id][batch_ant_pkt_count_[ant_id]++] = pkt_ptr + hdr_size;
 
           // High-water-mark PSN gap detection per antenna
           if (last_psn_valid_[ant_id]) {
             int32_t delta = static_cast<int32_t>((psn - last_psn_[ant_id]) & 0x00FFFFFF);
             if (delta > 0x007FFFFF) delta -= 0x01000000;
             if (delta > 0) {
-              uint32_t missed = (delta / 2) - 1;
+              const int A = cached_num_antennas_;
+              uint32_t missed = (delta / (A > 0 ? A : 1)) - 1;
               if (missed > 0) {
                 ttl_psn_gaps_++;
                 ttl_psn_gaps_ant_[ant_id]++;
               }
               last_psn_[ant_id] = psn;
+            } else if (delta < 0) {
+              ttl_psn_ooo_ant_[ant_id]++;
             }
           } else {
             last_psn_[ant_id] = psn;
@@ -245,13 +280,15 @@ class Hitek9081RxOp : public Operator {
           ttl_data_frames_++;
           ttl_payload_bytes_ += payload_len;
           aggr_pkts_recv_++;
+        }
 
-          if (aggr_pkts_recv_ >= batch_size_.get()) {
-            aggr_pkts_recv_ = 0;
-            process_batch();
-          }
+        // Process batch on burst boundary to ensure complete bursts are tracked together
+        if (aggr_pkts_recv_ >= batch_sz) {
+          aggr_pkts_recv_ = 0;
+          process_batch();
         }
       }
+      if (!any_burst) break;
     }
 
     if (pending_emit_) {
@@ -273,12 +310,16 @@ class Hitek9081RxOp : public Operator {
       if (A >= 2) {
         int64_t d0 = ttl_psn_gaps_ant_[0] - last_report_psn_gaps_ant_[0];
         int64_t d1 = ttl_psn_gaps_ant_[1] - last_report_psn_gaps_ant_[1];
+        int64_t ooo0 = ttl_psn_ooo_ant_[0] - last_report_psn_ooo_ant_[0];
+        int64_t ooo1 = ttl_psn_ooo_ant_[1] - last_report_psn_ooo_ant_[1];
         HOLOSCAN_LOG_INFO("RX: {:.3f} Mfps | {:.2f} Gbps ({:.0f} MB/s) | {} frames | "
-                          "PSN gaps: {} (ant0:{} ant1:{})",
+                          "PSN gaps: {} (ant0:{} ant1:{}) | ooo:({}:{})",
                           mfps, payload_gbps, payload_mbps, ttl_data_frames_,
-                          delta_gaps, d0, d1);
-        for (int a = 0; a < A; a++)
+                          delta_gaps, d0, d1, ooo0, ooo1);
+        for (int a = 0; a < A; a++) {
           last_report_psn_gaps_ant_[a] = ttl_psn_gaps_ant_[a];
+          last_report_psn_ooo_ant_[a] = ttl_psn_ooo_ant_[a];
+        }
       } else {
         HOLOSCAN_LOG_INFO("RX: {:.3f} Mfps | {:.2f} Gbps ({:.0f} MB/s) | {} frames | PSN gaps: {}",
                           mfps, payload_gbps, payload_mbps, ttl_data_frames_, delta_gaps);
@@ -331,6 +372,7 @@ class Hitek9081RxOp : public Operator {
       free_all_packets_and_burst_rx(cur_batch_.bursts[m]);
     }
     cur_batch_.num_bursts = 0;
+    batch_ant_pkt_count_.fill(0);
   }
 
   void process_batch() {
@@ -342,86 +384,104 @@ class Hitek9081RxOp : public Operator {
         free_all_packets_and_burst_rx(cur_batch_.bursts[m]);
       }
       cur_batch_.num_bursts = 0;
+      batch_ant_pkt_count_.fill(0);
       return;
     }
 
     int idx = cur_batch_idx_;
 
-    accumulate_batch(h_dev_ptrs_[idx], h_pkt_antenna_[idx]);
+    accumulate_batch(idx);
 
     cudaEventRecord(rx_events_[idx], accum_stream_);
     cur_batch_.evt = rx_events_[idx];
     batch_q_.push(cur_batch_);
 
     cur_batch_.num_bursts = 0;
+    batch_ant_pkt_count_.fill(0);
     cur_batch_idx_ = (cur_batch_idx_ + 1) % num_concurrent;
   }
 
-  void accumulate_batch(void** pkt_ptrs, uint8_t* pkt_antennas) {
-    const int A = num_antennas_.get();
-    const int S = samples_per_antenna_.get();
-    const int N = fft_size_.get();
-    const int total_pkts = batch_size_.get();
+  void accumulate_batch(int batch_idx) {
+    const int A = cached_num_antennas_;
+    const int S = cached_samples_per_ant_;
+    const int N = cached_fft_size_;
+    const int iq_fmt = cached_iq_format_;
+    const int pkts_needed = (N + S - 1) / S;
 
-    // Partition packets by antenna ID (from UDP dst port)
-    for (int a = 0; a < A; a++) ant_pkt_count_[a] = 0;
-    for (int i = 0; i < total_pkts; i++) {
-      int a = pkt_antennas[i];
-      if (a < A) {
-        h_ant_ptrs_[a][ant_pkt_count_[a]++] = pkt_ptrs[i];
-      }
-    }
-
-    // Accumulate each antenna independently
+    // Fast path: when batch contains enough packets for a full FFT buffer (typical case with batch_size=20480),
+    // gather a completely fresh, unbroken, synchronous snapshot of N samples for all antennas from offset 0.
+    bool all_have_enough = true;
     for (int a = 0; a < A; a++) {
-      int remaining = ant_pkt_count_[a];
-      int offset = 0;
-      while (remaining > 0) {
-        int needed = N - accum_offset_[a];
-        int pkts_needed = (needed + S - 1) / S;
-        int pkts_to_copy = std::min(pkts_needed, remaining);
-        int samples_to_copy = std::min(pkts_to_copy * S, needed);
-
-        gather_iq_from_scattered(h_ant_ptrs_[a] + offset,
-                                 static_cast<int16_t*>(accum_bufs_[active_buf_][a]),
-                                 pkts_to_copy, S,
-                                 accum_offset_[a], iq_format_.get(), accum_stream_);
-
-        accum_offset_[a] += samples_to_copy;
-        offset += pkts_to_copy;
-        remaining -= pkts_to_copy;
-
-        if (accum_offset_[a] >= N) {
-          accum_offset_[a] = 0;
-        }
+      if (batch_ant_pkt_count_[a] < pkts_needed) {
+        all_have_enough = false;
+        break;
       }
     }
 
-    // Emit when antenna 0 has filled — zero stale data in next buffer
-    if (accum_offset_[0] == 0 && ant_pkt_count_[0] > 0) {
+    if (all_have_enough) {
+      for (int a = 0; a < A; a++) {
+        gather_iq_from_scattered(h_ant_ptrs_[batch_idx][a],
+                                 static_cast<int16_t*>(accum_bufs_[active_buf_][a]),
+                                 pkts_needed, S,
+                                 0, N, iq_fmt, accum_stream_);
+        accum_offset_[a] = 0;
+      }
       pending_emit_ = true;
       pending_emit_buf_ = active_buf_;
-      int next_buf = (active_buf_ + 1) % NUM_ACCUM_BUFS;
+      active_buf_ = (active_buf_ + 1) % NUM_ACCUM_BUFS;
+    } else {
+      // Fallback: multi-batch accumulation for small batch configurations
       for (int a = 0; a < A; a++) {
-        cudaMemsetAsync(accum_bufs_[next_buf][a], 0,
-                        N * 2 * sizeof(int16_t), accum_stream_);
+        int remaining = batch_ant_pkt_count_[a];
+        if (remaining <= 0) continue;
+
+        int needed = N - accum_offset_[a];
+        if (needed <= 0) continue;
+
+        int pkts_to_copy = std::min((needed + S - 1) / S, remaining);
+        int samples_to_copy = std::min(pkts_to_copy * S, needed);
+
+        gather_iq_from_scattered(h_ant_ptrs_[batch_idx][a],
+                                 static_cast<int16_t*>(accum_bufs_[active_buf_][a]),
+                                 pkts_to_copy, S,
+                                 accum_offset_[a], N, iq_fmt, accum_stream_);
+
+        accum_offset_[a] += samples_to_copy;
       }
-      active_buf_ = next_buf;
+
+      bool all_full = true;
+      for (int a = 0; a < A; a++) {
+        if (accum_offset_[a] < N) {
+          all_full = false;
+          break;
+        }
+      }
+
+      if (all_full) {
+        pending_emit_ = true;
+        pending_emit_buf_ = active_buf_;
+        int next_buf = (active_buf_ + 1) % NUM_ACCUM_BUFS;
+        for (int a = 0; a < A; a++) {
+          accum_offset_[a] = 0;
+          cudaMemsetAsync(accum_bufs_[next_buf][a], 0,
+                          N * 2 * sizeof(int16_t), accum_stream_);
+        }
+        active_buf_ = next_buf;
+      }
     }
   }
 
   void emit_iq(int src_buf, OutputContext& op_output) {
-    const int A = num_antennas_.get();
-    const int N = fft_size_.get();
+    const int A = cached_num_antennas_;
+    const int N = cached_fft_size_;
     const int dst_buf = active_output_buf_;
     active_output_buf_ = (active_output_buf_ + 1) % NUM_OUTPUT_BUFS;
 
-    cudaStreamSynchronize(accum_stream_);
-
     for (int a = 0; a < A; a++) {
-      cudaMemcpy(output_bufs_[dst_buf][a], accum_bufs_[src_buf][a],
-                 N * 2 * sizeof(int16_t), cudaMemcpyDeviceToDevice);
+      cudaMemcpyAsync(output_bufs_[dst_buf][a], accum_bufs_[src_buf][a],
+                      N * 2 * sizeof(int16_t), cudaMemcpyDeviceToDevice, accum_stream_);
     }
+    cudaEventRecord(emit_event_, accum_stream_);
 
     holoscan::TensorMap out_msg;
     for (int a = 0; a < A; a++) {
@@ -447,8 +507,17 @@ class Hitek9081RxOp : public Operator {
   }
 
   void dump_raw_samples(const uint8_t* pkt_ptr, int pkt_len, int ant) {
+    if (dump_done_) return;
     if (ant < 0 || ant >= num_antennas_.get()) return;
-    if (raw_dump_samples_[ant] >= fft_size_.get()) return;
+    if (raw_dump_samples_[ant] >= fft_size_.get()) {
+      // Check if all antennas are done
+      bool all_done = true;
+      for (int a = 0; a < num_antennas_.get(); a++) {
+        if (raw_dump_samples_[a] < fft_size_.get()) { all_done = false; break; }
+      }
+      if (all_done) dump_done_ = true;
+      return;
+    }
 
     // 5-second delay for DPDK/JESD link stabilization
     if (!dump_start_set_) {
@@ -515,12 +584,10 @@ class Hitek9081RxOp : public Operator {
 
   void freeResources() {
     for (int n = 0; n < num_concurrent; n++) {
-      if (h_dev_ptrs_[n]) cudaFreeHost(h_dev_ptrs_[n]);
-      if (h_pkt_antenna_[n]) cudaFreeHost(h_pkt_antenna_[n]);
+      for (int a = 0; a < MAX_ANTENNAS; a++) {
+        if (h_ant_ptrs_[n][a]) cudaFreeHost(h_ant_ptrs_[n][a]);
+      }
       if (rx_events_[n]) cudaEventDestroy(rx_events_[n]);
-    }
-    for (int a = 0; a < MAX_ANTENNAS; a++) {
-      if (h_ant_ptrs_[a]) cudaFreeHost(h_ant_ptrs_[a]);
     }
     for (int b = 0; b < NUM_ACCUM_BUFS; b++) {
       for (auto p : accum_bufs_[b]) { if (p) cudaFree(p); }
@@ -528,6 +595,7 @@ class Hitek9081RxOp : public Operator {
     for (int b = 0; b < NUM_OUTPUT_BUFS; b++) {
       for (auto p : output_bufs_[b]) { if (p) cudaFree(p); }
     }
+    if (emit_event_) cudaEventDestroy(emit_event_);
     if (accum_stream_) cudaStreamDestroy(accum_stream_);
   }
 
@@ -541,28 +609,34 @@ class Hitek9081RxOp : public Operator {
   int64_t aggr_pkts_recv_ = 0;
   int64_t ttl_packets_dropped_ = 0;
   int64_t ttl_metadata_pkts_ = 0;
+
+  // Cached Parameter values — set once in initialize(), used in hot path
+  int cached_fft_size_ = 0;
+  int cached_num_antennas_ = 0;
+  int cached_samples_per_ant_ = 0;
+  int cached_iq_format_ = 0;
+  int cached_batch_size_ = 0;
   uint32_t last_psn_[MAX_ANTENNAS] = {};
   bool last_psn_valid_[MAX_ANTENNAS] = {};
   int64_t ttl_psn_gaps_ = 0;
   int64_t ttl_psn_gaps_ant_[MAX_ANTENNAS] = {};
-  int psn_log_count_ = 0;
   int raw_dump_samples_[MAX_ANTENNAS] = {};
   FILE* raw_dump_file_[MAX_ANTENNAS] = {};
   FILE* raw_dump_pkt_file_[MAX_ANTENNAS] = {};
   std::chrono::steady_clock::time_point dump_start_;
   bool dump_start_set_ = false;
   bool dump_ready_ = false;
+  bool dump_done_ = false;
   uint16_t nom_payload_size_;
-  std::array<void**, num_concurrent> h_dev_ptrs_{};
-  std::array<uint8_t*, num_concurrent> h_pkt_antenna_{};
   std::array<cudaEvent_t, num_concurrent> rx_events_{};
 
-  // Per-antenna packet demux scratch
-  void** h_ant_ptrs_[MAX_ANTENNAS] = {};
-  int ant_pkt_count_[MAX_ANTENNAS] = {};
+  // Direct per-batch, per-antenna packet pointers (pre-segregated, zero-copy)
+  std::array<std::array<void**, MAX_ANTENNAS>, num_concurrent> h_ant_ptrs_{};
+  std::array<int, MAX_ANTENNAS> batch_ant_pkt_count_{};
 
   // IQ accumulation — per-antenna offsets
   cudaStream_t accum_stream_ = nullptr;
+  cudaEvent_t emit_event_ = nullptr;
   std::vector<void*> accum_bufs_[NUM_ACCUM_BUFS];
   int active_buf_ = 0;
   int accum_offset_[MAX_ANTENNAS] = {};
@@ -583,6 +657,11 @@ class Hitek9081RxOp : public Operator {
   Parameter<int> samples_per_antenna_;
   Parameter<int> iq_format_;
   Parameter<uint32_t> data_port_;
+  Parameter<int> rx_core_;
+
+  bool thread_pinned_ = false;
+  int64_t ttl_psn_ooo_ant_[MAX_ANTENNAS] = {};
+  int64_t last_report_psn_ooo_ant_[MAX_ANTENNAS] = {};
 
   // Throughput reporting
   std::chrono::steady_clock::time_point last_report_time_ = std::chrono::steady_clock::now();
