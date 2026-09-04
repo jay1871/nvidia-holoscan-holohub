@@ -155,6 +155,14 @@ RUN CUDA_VERSION=$(nvcc --version | sed -n 's/^.*release \([0-9]\+\.[0-9]\+\).*$
         ibverbs-utils \
         python3-dev \
         rustc \
+        libx11-dev \
+        libxcursor-dev \
+        libxrandr-dev \
+        libxinerama-dev \
+        libxi-dev \
+        libgl-dev \
+        libglx-dev \
+        libegl-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # PIP installs
@@ -212,7 +220,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         pkgconf \
         meson \
         python3-pyelftools \
-        libnuma-dev \
+        libnuma-dev libpcap-dev \
     && rm -rf /var/lib/apt/lists/*
 
 COPY pkg/holoscan-networking/dpdk_patches /tmp/dpdk_patches
@@ -238,8 +246,7 @@ RUN curl -fsSL https://fast.dpdk.org/rel/dpdk-${DPDK_VERSION}.tar.xz -o /tmp/dpd
         -Dtests=false \
         -Dplatform=generic \
         -Denable_docs=false \
-        -Ddisable_apps=* \
-        -Denable_drivers=bus/auxiliary,bus/pci,bus/vdev,common/mlx5,mempool/ring,mempool/stack,net/af_packet,net/mlx5,net/ring \
+        -Denable_drivers=bus/auxiliary,bus/pci,bus/vdev,common/mlx5,mempool/ring,mempool/stack,net/af_packet,net/mlx5,net/ring,net/pcap \
     && cd ${DPDK_BUILD_DIR} \
     && ninja \
     && meson install \
@@ -314,6 +321,14 @@ RUN apt-get update \
     && rm -f /tmp/daqiri.deb \
     && rm -rf /var/lib/apt/lists/* \
     && ldconfig
+
+# TensorRT for AMC inference (ONNX → engine compilation + runtime)
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        libnvinfer-dev \
+        libnvinfer-plugin-dev \
+        libnvonnxparsers-dev \
+    && rm -rf /var/lib/apt/lists/*
 
 # DAQIRI's Python bindings use pybind11's CMake package. The package is
 # installed with pip above, so expose that package directory to CMake.

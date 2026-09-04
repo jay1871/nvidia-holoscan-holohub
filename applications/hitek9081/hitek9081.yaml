@@ -1,0 +1,173 @@
+%YAML 1.2
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+---
+
+# =============================================================================
+# HSB FPGA Configuration
+# =============================================================================
+# payload_size: FPGA payload bytes per packet (between RoCE headers and ICRC)
+# mtu: must be >= payload_size (hardware max: 4096)
+# custom_header_size: bytes before IQ data in payload (0 if pure IQ)
+#
+hsb:
+  hololink_ip: "192.168.0.2"
+  payload_size: 3904
+  mtu: 4096
+  custom_header_size: 0
+  data_port: 4096
+
+# =============================================================================
+# Holoscan Scheduler
+# =============================================================================
+scheduler:
+  check_recession_period_ms: 0
+  worker_thread_number: 5
+  stop_on_deadlock: true
+  stop_on_deadlock_timeout: -1
+
+# =============================================================================
+# DAQIRI DPDK Configuration
+# =============================================================================
+# host_pinned memory is GPU-accessible on DGX Spark (unified LPDDR5) —
+# enables zero-copy scatter-gather without GPUDirect or cudaMemcpy.
+#
+# Scaling to higher data rates:
+#   Each RX queue is pinned to one isolated CPU core. A single ARM core
+#   can service ~1.5M pkt/s. The FPGA at 983.04 MSPS produces ~1.0M
+#   pkt/s (~31 Gbps). To reach 100 Gbps, add more queues on separate
+#   isolated cores.
+#
+#   Isolated cores on DGX Spark: set via kernel cmdline `isolcpus=16-19`
+#   (4 cores available). Each queue below should use a distinct isolated
+#   core. Non-isolated cores (like master_core: 8) handle DPDK management.
+#
+#   To add queues: duplicate the rx_q_0 block with a new id and cpu_core,
+#   then add a corresponding flow rule (or use RSS for automatic distribution).
+#
+daqiri:
+  cfg:
+    version: 1
+    stream_type: "raw"
+    master_core: 8              # non-isolated core for DPDK management
+    debug: false
+    log_level: "info"
+    loopback: ""
+
+    memory_regions:
+    - name: "HSB_RX_CPU"
+      kind: "host_pinned"       # GPU-accessible on unified memory (DGX Spark). Use "device" for GPUDirect on discrete GPUs.
+      affinity: 0               # NUMA node (DGX Spark has only node 0)
+      num_bufs: 409600          # ~270ms pool at 1.5M pkt/s. Must cover DDC+GPU processing latency.
+      buf_size: 8192            # >= 70 (RoCE hdr) + payload_size + 4 (ICRC) + ~128 (DPDK headroom)
+
+    interfaces:
+    - name: "hsb_rx_port"
+      address: "0002:01:00.0"
+      rx:
+        flow_isolation: true
+        queues:
+        # Each queue must be on a separate isolated core (isolcpus=16-19)
+        - name: "rx_q_0"
+          id: 0
+          cpu_core: 16          # isolated core
+          batch_size: 20480     # DPDK burst size, tuned for ConnectX ring depth
+          memory_regions:
+            - "HSB_RX_CPU"
+        # Uncomment to scale beyond ~1.5M pkt/s (one queue per isolated core):
+        # - name: "rx_q_1"
+        #   id: 1
+        #   cpu_core: 17        # isolated core
+        #   batch_size: 20480
+        #   memory_regions:
+        #     - "HSB_RX_CPU"
+        # - name: "rx_q_2"
+        #   id: 2
+        #   cpu_core: 18        # isolated core
+        #   batch_size: 20480
+        #   memory_regions:
+        #     - "HSB_RX_CPU"
+        # - name: "rx_q_3"
+        #   id: 3
+        #   cpu_core: 19        # isolated core
+        #   batch_size: 20480
+        #   memory_regions:
+        #     - "HSB_RX_CPU"
+        flows:
+        - name: "hsb_flow_0"
+          id: 0
+          action:
+            type: queue
+            id: 0
+          match:
+            udp_src: 12288      # FPGA DATA_SOURCE_UDP_PORT (0x3000)
+            udp_dst: 4096       # must match hsb.data_port
+        # Uncomment to match additional FPGA source ports to queues:
+        # (FPGA must stripe packets: src_port = 12288 + pkt_count % num_queues)
+        # - name: "hsb_flow_1"
+        #   id: 1
+        #   action:
+        #     type: queue
+        #     id: 1
+        #   match:
+        #     udp_src: 12289
+        #     udp_dst: 4096
+        # - name: "hsb_flow_2"
+        #   id: 2
+        #   action:
+        #     type: queue
+        #     id: 2
+        #   match:
+        #     udp_src: 12290
+        #     udp_dst: 4096
+        # - name: "hsb_flow_3"
+        #   id: 3
+        #   action:
+        #     type: queue
+        #     id: 3
+        #   match:
+        #     udp_src: 12291
+        #     udp_dst: 4096
+
+# =============================================================================
+# Hitek9081RxOp — Zero-copy scatter-gather RX
+# =============================================================================
+# Computed from hsb config: max_packet_size, header_size, samples_per_antenna
+#
+hitek9081_rx:
+  interface_name: "hsb_rx_port"
+  batch_size: 4096
+  iq_format: 1                  # 0=pair-interleaved [I,Q,I,Q,...], 1=block-4 [IIII,QQQQ,...]
+
+# =============================================================================
+# SpectralOp — FFT + Averaging + Magnitude (GPU DSP)
+# =============================================================================
+# fft_size, num_antennas, num_averages are set via CLI args
+#
+spectral:
+  iq_swap: 0                    # 0=I,Q as-is  1=swap Q,I  2=I,Q conjugate (negate Q)
+  adc_bits: 16                  # ADC resolution
+  amc_model_path: "/workspace/holohub/applications/hitek9081/models/amc_model.onnx"  # Path to ONNX model (empty = classification disabled)
+  # amc_model_path: ""  # Path to ONNX model (empty = classification disabled)
+  db_min: -120.0
+  db_max: -10.0
+
+# =============================================================================
+# DDCOp — Digital Down-Converter (placeholder)
+# =============================================================================
+ddc:
+  enabled: false
+  center_frequency_hz: 3.5e9
+  bandwidth_hz: 1.0e6

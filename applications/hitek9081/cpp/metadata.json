@@ -1,0 +1,44 @@
+{
+  "application": {
+    "name": "HTK9081 Spectrum Analyzer",
+    "authors": [
+      {
+        "name": "NVIDIA",
+        "affiliation": "NVIDIA"
+      }
+    ],
+    "language": "C++",
+    "version": "1.0",
+    "changelog": {
+      "1.0": "Initial HSB FPGA receive via DAQIRI DPDK"
+    },
+    "platforms": ["x86_64", "aarch64"],
+    "tags": ["Networking and Distributed Computing", "HSB", "UDP", "GPUDirect", "DPDK"],
+    "dockerfile": "pkg/holoscan-networking/Dockerfile",
+    "holoscan_sdk": {
+      "minimum_required_version": "2.6.0",
+      "tested_versions": [
+        "4.3.0"
+      ]
+    },
+    "ranking": 1,
+    "requirements": {
+      "libraries": [
+        {
+          "name": "DAQIRI",
+          "version": "0.1.0",
+          "url": "https://github.com/nvidia/daqiri"
+        },
+        {
+          "name": "hololink",
+          "version": "1.0.0",
+          "url": "https://github.com/nvidia-holoscan/holoscan-sensor-bridge"
+        }
+      ]
+    },
+    "run": {
+      "command": "<holohub_app_bin>/hitek9081 hitek9081.yaml --hololink 192.168.0.2",
+      "workdir": "holohub_bin"
+    }
+  }
+}
