@@ -239,7 +239,7 @@ class Hitek9081RxOp : public Operator {
             uint16_t udp_dst = (static_cast<uint16_t>(pkt_ptr[UDP_DST_OFFSET]) << 8) |
                                 static_cast<uint16_t>(pkt_ptr[UDP_DST_OFFSET + 1]);
             ant_id = static_cast<int>(udp_dst) - base_port;
-            if (ant_id < 0 || ant_id >= MAX_ANTENNAS) ant_id = 0;
+            if (ant_id < 0 || ant_id >= cached_num_antennas_) continue;
           }
 
           int payload_len = static_cast<int>(pkt_len) - static_cast<int>(hdr_size);
@@ -307,22 +307,30 @@ class Hitek9081RxOp : public Operator {
       double payload_mbps = delta_bytes / (secs * 1e6);
       const int A = num_antennas_.get();
       int64_t delta_gaps = ttl_psn_gaps_ - last_report_psn_gaps_;
-      if (A >= 2) {
-        int64_t d0 = ttl_psn_gaps_ant_[0] - last_report_psn_gaps_ant_[0];
-        int64_t d1 = ttl_psn_gaps_ant_[1] - last_report_psn_gaps_ant_[1];
-        int64_t ooo0 = ttl_psn_ooo_ant_[0] - last_report_psn_ooo_ant_[0];
-        int64_t ooo1 = ttl_psn_ooo_ant_[1] - last_report_psn_ooo_ant_[1];
-        HOLOSCAN_LOG_INFO("RX: {:.3f} Mfps | {:.2f} Gbps ({:.0f} MB/s) | {} frames | "
-                          "PSN gaps: {} (ant0:{} ant1:{}) | ooo:({}:{})",
-                          mfps, payload_gbps, payload_mbps, ttl_data_frames_,
-                          delta_gaps, d0, d1, ooo0, ooo1);
+      if (A > 1) {
+        std::string ant_gaps_str;
+        std::string ooo_str;
         for (int a = 0; a < A; a++) {
-          last_report_psn_gaps_ant_[a] = ttl_psn_gaps_ant_[a];
-          last_report_psn_ooo_ant_[a] = ttl_psn_ooo_ant_[a];
+          int64_t d = ttl_psn_gaps_ant_[a] - last_report_psn_gaps_ant_[a];
+          int64_t ooo = ttl_psn_ooo_ant_[a] - last_report_psn_ooo_ant_[a];
+          if (a > 0) {
+            ant_gaps_str += " ";
+            ooo_str += ":";
+          }
+          ant_gaps_str += "ant" + std::to_string(a) + ":" + std::to_string(d);
+          ooo_str += std::to_string(ooo);
         }
+        HOLOSCAN_LOG_INFO("RX: {:.3f} Mfps | {:.2f} Gbps ({:.0f} MB/s) | {} frames | "
+                          "PSN gaps: {} ({}) | ooo:({})",
+                          mfps, payload_gbps, payload_mbps, ttl_data_frames_,
+                          delta_gaps, ant_gaps_str, ooo_str);
       } else {
         HOLOSCAN_LOG_INFO("RX: {:.3f} Mfps | {:.2f} Gbps ({:.0f} MB/s) | {} frames | PSN gaps: {}",
                           mfps, payload_gbps, payload_mbps, ttl_data_frames_, delta_gaps);
+      }
+      for (int a = 0; a < A; a++) {
+        last_report_psn_gaps_ant_[a] = ttl_psn_gaps_ant_[a];
+        last_report_psn_ooo_ant_[a] = ttl_psn_ooo_ant_[a];
       }
       last_report_frames_ = ttl_data_frames_;
       last_report_bytes_ = ttl_payload_bytes_;
@@ -508,15 +516,22 @@ class Hitek9081RxOp : public Operator {
 
   void dump_raw_samples(const uint8_t* pkt_ptr, int pkt_len, int ant) {
     if (dump_done_) return;
-    if (ant < 0 || ant >= num_antennas_.get()) return;
-    if (raw_dump_samples_[ant] >= fft_size_.get()) {
-      // Check if all antennas are done
+    if (ant < 0 || ant >= cached_num_antennas_) return;
+    if (raw_dump_samples_[ant] >= cached_fft_size_) {
+      // Check if all antennas that have received data are done
       bool all_done = true;
-      for (int a = 0; a < num_antennas_.get(); a++) {
-        if (raw_dump_samples_[a] < fft_size_.get()) { all_done = false; break; }
+      for (int a = 0; a < cached_num_antennas_; a++) {
+        if (dump_ant_seen_[a] && raw_dump_samples_[a] < cached_fft_size_) {
+          all_done = false;
+          break;
+        }
       }
-      if (all_done) dump_done_ = true;
+      if (all_done && dump_ant_seen_count_ > 0) dump_done_ = true;
       return;
+    }
+    if (!dump_ant_seen_[ant]) {
+      dump_ant_seen_[ant] = true;
+      dump_ant_seen_count_++;
     }
 
     // 5-second delay for DPDK/JESD link stabilization
@@ -530,15 +545,16 @@ class Hitek9081RxOp : public Operator {
       HOLOSCAN_LOG_INFO("=== Dump delay elapsed — capturing steady-state data ===");
     }
 
-    int num_samp = samples_per_antenna_.get();
+    int num_samp = cached_samples_per_ant_;
     const int16_t* samples = reinterpret_cast<const int16_t*>(pkt_ptr + header_size_.get());
+    const int fft_n = cached_fft_size_;
 
     if (!raw_dump_file_[ant]) {
       char path[128];
       snprintf(path, sizeof(path), "/tmp/hitek9081_raw_iq_dump_ant%d.bin", ant);
       raw_dump_file_[ant] = fopen(path, "wb");
       if (raw_dump_file_[ant])
-        HOLOSCAN_LOG_INFO("=== Dumping {} samples to {} ===", fft_size_.get(), path);
+        HOLOSCAN_LOG_INFO("=== Dumping {} samples to {} ===", fft_n, path);
     }
     if (!raw_dump_pkt_file_[ant]) {
       char path[128];
@@ -552,11 +568,11 @@ class Hitek9081RxOp : public Operator {
       }
     }
     if (raw_dump_file_[ant]) {
-      int to_write = std::min(num_samp, fft_size_.get() - raw_dump_samples_[ant]);
+      int to_write = std::min(num_samp, fft_n - raw_dump_samples_[ant]);
       fwrite(samples, sizeof(int16_t), to_write * 2, raw_dump_file_[ant]);
       fflush(raw_dump_file_[ant]);
       raw_dump_samples_[ant] += to_write;
-      if (raw_dump_samples_[ant] >= fft_size_.get()) {
+      if (raw_dump_samples_[ant] >= fft_n) {
         fclose(raw_dump_file_[ant]);
         raw_dump_file_[ant] = nullptr;
         HOLOSCAN_LOG_INFO("=== Raw IQ dump ant{} complete: {} complex samples ===",
@@ -574,7 +590,7 @@ class Hitek9081RxOp : public Operator {
       fwrite(&phdr, sizeof(phdr), 1, raw_dump_pkt_file_[ant]);
       fwrite(pkt_ptr, 1, pkt_len, raw_dump_pkt_file_[ant]);
       fflush(raw_dump_pkt_file_[ant]);
-      if (raw_dump_samples_[ant] >= fft_size_.get()) {
+      if (raw_dump_samples_[ant] >= fft_n) {
         fclose(raw_dump_pkt_file_[ant]);
         raw_dump_pkt_file_[ant] = nullptr;
         HOLOSCAN_LOG_INFO("=== Full packet dump ant{} complete ===", ant);
@@ -627,6 +643,8 @@ class Hitek9081RxOp : public Operator {
   bool dump_start_set_ = false;
   bool dump_ready_ = false;
   bool dump_done_ = false;
+  bool dump_ant_seen_[MAX_ANTENNAS] = {};
+  int dump_ant_seen_count_ = 0;
   uint16_t nom_payload_size_;
   std::array<cudaEvent_t, num_concurrent> rx_events_{};
 

@@ -137,7 +137,7 @@ daqiri:
 hitek9081_rx:
   interface_name: "hsb_rx_port"
   batch_size: 20480             # match DPDK burst size — one burst = one kernel launch
-  num_antennas: 2               # ADC channels (1/2/4)
+  num_antennas: 4               # ADC channels (1/2/4)
   iq_format: 1                  # 0=pair-interleaved [I,Q,I,Q,...], 1=block-4 [IIII,QQQQ,...]
   rx_core: 18                   # dedicated isolated CPU core (isolcpus=16-19)
 

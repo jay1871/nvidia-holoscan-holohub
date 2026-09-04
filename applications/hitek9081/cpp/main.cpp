@@ -543,6 +543,11 @@ int main(int argc, char** argv) {
   std::vector<std::unique_ptr<hololink::DataChannel>> hololink_channels;
   for (int i = 0; i < cfg.num_antennas; i++) {
     hololink::Metadata meta = hololink::Enumerator::find_channel(hololink_ip);
+    if (i == 0) {
+      auto board_desc = meta.get<std::string>("board_description").value_or("unknown");
+      auto fpga_uuid = meta.get<std::string>("fpga_uuid").value_or("unknown");
+      HOLOSCAN_LOG_INFO("HSB Board: '{}' (FPGA UUID: {})", board_desc, fpga_uuid);
+    }
     hololink::DataChannel::use_sensor(meta, i);
     hololink::DataChannel::use_mtu(meta, mtu);
     hololink_channels.push_back(std::make_unique<hololink::DataChannel>(meta));
