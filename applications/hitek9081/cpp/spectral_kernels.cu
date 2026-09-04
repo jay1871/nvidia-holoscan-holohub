@@ -363,20 +363,15 @@ __global__ void gather_iq_kernel(const uint8_t* src, int16_t* dst,
   int16_t i_val, q_val;
 
   if (iq_format == 1) {
-    // Block-interleaved: [I0,I1,I2,I3,Q0,Q1,Q2,Q3] per group of 4 samples
     int group = sample_in_pkt / 4;
     int pos   = sample_in_pkt % 4;
     i_val = pkt_start[group * 8 + pos];
     q_val = pkt_start[group * 8 + pos + 4];
   } else {
-    // Pair-interleaved: [I0,Q0,I1,Q1,...] (original format)
-    // i_val = pkt_start[sample_in_pkt * 2];
-    // q_val = pkt_start[sample_in_pkt * 2 + 1];
     i_val = pkt_start[sample_in_pkt * 2];
     q_val = pkt_start[sample_in_pkt * 2 + 1];
   }
 
-  // Destination: contiguous [I,Q,I,Q,...] starting at dst_sample_offset
   int dst_idx = (dst_sample_offset + idx) * 2;
   dst[dst_idx] = i_val;
   dst[dst_idx + 1] = q_val;

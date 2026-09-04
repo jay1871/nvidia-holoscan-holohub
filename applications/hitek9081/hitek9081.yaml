@@ -86,13 +86,12 @@ daqiri:
           batch_size: 20480     # DPDK burst size, tuned for ConnectX ring depth
           memory_regions:
             - "HSB_RX_CPU"
-        # Uncomment to scale beyond ~1.5M pkt/s (one queue per isolated core):
-        # - name: "rx_q_1"
-        #   id: 1
-        #   cpu_core: 17        # isolated core
-        #   batch_size: 20480
-        #   memory_regions:
-        #     - "HSB_RX_CPU"
+        - name: "rx_q_1"
+          id: 1
+          cpu_core: 17          # isolated core
+          batch_size: 20480
+          memory_regions:
+            - "HSB_RX_CPU"
         # - name: "rx_q_2"
         #   id: 2
         #   cpu_core: 18        # isolated core
@@ -113,33 +112,32 @@ daqiri:
             id: 0
           match:
             udp_src: 12288      # FPGA DATA_SOURCE_UDP_PORT (0x3000)
-            udp_dst: 4096       # must match hsb.data_port
-        # Uncomment to match additional FPGA source ports to queues:
-        # (FPGA must stripe packets: src_port = 12288 + pkt_count % num_queues)
-        # - name: "hsb_flow_1"
-        #   id: 1
-        #   action:
-        #     type: queue
-        #     id: 1
-        #   match:
-        #     udp_src: 12289
-        #     udp_dst: 4096
+            udp_dst: 4096       # ADC channel 0
+        - name: "hsb_flow_1"
+          id: 1
+          action:
+            type: queue
+            id: 1
+          match:
+            udp_src: 12288
+            udp_dst: 4097       # ADC channel 1
+        # Uncomment for 4-channel ADC (set num_antennas: 4):
         # - name: "hsb_flow_2"
         #   id: 2
         #   action:
         #     type: queue
-        #     id: 2
+        #     id: 0
         #   match:
-        #     udp_src: 12290
-        #     udp_dst: 4096
+        #     udp_src: 12288
+        #     udp_dst: 4098     # ADC channel 2
         # - name: "hsb_flow_3"
         #   id: 3
         #   action:
         #     type: queue
-        #     id: 3
+        #     id: 1
         #   match:
-        #     udp_src: 12291
-        #     udp_dst: 4096
+        #     udp_src: 12288
+        #     udp_dst: 4099     # ADC channel 3
 
 # =============================================================================
 # Hitek9081RxOp — Zero-copy scatter-gather RX
@@ -149,6 +147,7 @@ daqiri:
 hitek9081_rx:
   interface_name: "hsb_rx_port"
   batch_size: 4096
+  num_antennas: 2               # ADC channels (1/2/4)
   iq_format: 1                  # 0=pair-interleaved [I,Q,I,Q,...], 1=block-4 [IIII,QQQQ,...]
 
 # =============================================================================

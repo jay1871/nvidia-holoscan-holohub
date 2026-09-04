@@ -138,10 +138,11 @@ struct AppConfig {
   bool use_imgui = false;
   bool waterfall = false;
 
-  // Computed from hsb.payload_size, hsb.custom_header_size, num_antennas
+  // Computed from hsb config
   uint16_t max_packet_size = 1482;
   uint16_t header_size = 70;
   int samples_per_antenna = 128;
+  uint32_t data_port = 4096;
 
   // Integer-MHz frequency ticks for the display grid (computed once, capped at 11)
   std::vector<double> tick_freqs_mhz;   // actual MHz values for labels
@@ -183,6 +184,7 @@ class App : public holoscan::Application {
         Arg("header_size", cfg_.header_size),
         Arg("samples_per_antenna", cfg_.samples_per_antenna),
         Arg("iq_format", cfg_.iq_format),
+        Arg("data_port", cfg_.data_port),
         this->is_alive);
 
     // Compute display bin range from frequency zoom settings.
@@ -501,7 +503,9 @@ int main(int argc, char** argv) {
   cfg.iq_format = yaml["hitek9081_rx"]["iq_format"].as<int>(1);
   cfg.max_packet_size = max_packet_size;
   cfg.header_size = header_size;
-  cfg.samples_per_antenna = static_cast<int>((frame_size - custom_header_size) / (cfg.num_antennas * 4));
+  cfg.data_port = data_port;
+  // Each channel arrives as separate packets on its own UDP port
+  cfg.samples_per_antenna = static_cast<int>((frame_size - custom_header_size) / 4);
 
   HOLOSCAN_LOG_INFO("HSB config: payload_size={} mtu={} custom_header_size={} data_port={} num_antennas={}",
                     frame_size, mtu, custom_header_size, data_port, cfg.num_antennas);
@@ -533,13 +537,15 @@ int main(int argc, char** argv) {
   CUcontext cu_context;
   CudaCheck(cuDevicePrimaryCtxRetain(&cu_context, cu_device));
 
-  HOLOSCAN_LOG_INFO("Enumerating HSB at {} ...", hololink_ip);
-  hololink::Metadata channel_metadata = hololink::Enumerator::find_channel(hololink_ip);
-  hololink::DataChannel::use_sensor(channel_metadata, 0);
-  hololink::DataChannel::use_mtu(channel_metadata, mtu);
-
-  hololink::DataChannel hololink_channel(channel_metadata);
-  std::shared_ptr<hololink::Hololink> hololink = hololink_channel.hololink();
+  HOLOSCAN_LOG_INFO("Enumerating HSB at {} — {} ADC channel(s)...", hololink_ip, cfg.num_antennas);
+  std::vector<std::unique_ptr<hololink::DataChannel>> hololink_channels;
+  for (int i = 0; i < cfg.num_antennas; i++) {
+    hololink::Metadata meta = hololink::Enumerator::find_channel(hololink_ip);
+    hololink::DataChannel::use_sensor(meta, i);
+    hololink::DataChannel::use_mtu(meta, mtu);
+    hololink_channels.push_back(std::make_unique<hololink::DataChannel>(meta));
+  }
+  std::shared_ptr<hololink::Hololink> hololink = hololink_channels[0]->hololink();
 
   HOLOSCAN_LOG_INFO("Starting hololink control plane...");
   hololink->start();
@@ -583,8 +589,11 @@ int main(int argc, char** argv) {
   // -------------------------------------------------------------------------
   // Phase 3: Program FPGA dataplane
   // -------------------------------------------------------------------------
-  hololink_channel.authenticate(0, 0);
-  hololink_channel.configure_roce(0, frame_size, page_size, pages, data_port);
+  for (int i = 0; i < cfg.num_antennas; i++) {
+    hololink_channels[i]->authenticate(0, 0);
+    hololink_channels[i]->configure_roce(0, frame_size, page_size, pages, data_port + i);
+    HOLOSCAN_LOG_INFO("Channel {} configured: sensor={} udp_dst={}", i, i, data_port + i);
+  }
 
   std::shared_ptr<hololink::HTK_JESD_HPS_Config> mxfe_config_;
   mxfe_config_ = std::make_shared<hololink::HTK_JESD_HPS_Config>(*hololink);
@@ -615,7 +624,7 @@ int main(int argc, char** argv) {
   // -------------------------------------------------------------------------
   // Phase 5: Teardown
   // -------------------------------------------------------------------------
-  hololink_channel.unconfigure();
+  for (auto& ch : hololink_channels) ch->unconfigure();
 
   daqiri::print_stats();
   daqiri::shutdown();

@@ -66,6 +66,8 @@ namespace holoscan::ops {
 static constexpr int BTH_OPCODE_OFFSET = 42;
 static constexpr int BTH_PSN_OFFSET = 50;   // BTH byte 8: 24-bit Packet Sequence Number
 static constexpr uint8_t ROCE_WRITE_ONLY_IMM = 0x2B;  // metadata packet — skip
+static constexpr int UDP_DST_OFFSET = 36;  // Eth(14) + IP(20) + UDP_src(2)
+
 
 class Hitek9081RxOp : public Operator {
  public:
@@ -74,12 +76,14 @@ class Hitek9081RxOp : public Operator {
 
   ~Hitek9081RxOp() {
     HOLOSCAN_LOG_INFO("Hitek9081RxOp: {} data frames | {} payload bytes | {} dropped | "
-                      "{} metadata skipped | {} PSN gaps ({} missing pkts)",
+                      "{} metadata skipped | {} PSN gaps",
                       ttl_data_frames_, ttl_payload_bytes_,
                       ttl_packets_dropped_, ttl_metadata_pkts_,
-                      ttl_psn_gaps_, ttl_psn_gap_pkts_);
-    if (raw_dump_file_) fclose(raw_dump_file_);
-    if (raw_dump_pkt_file_) fclose(raw_dump_pkt_file_);
+                      ttl_psn_gaps_);
+    for (int a = 0; a < MAX_ANTENNAS; a++) {
+      if (raw_dump_file_[a]) fclose(raw_dump_file_[a]);
+      if (raw_dump_pkt_file_[a]) fclose(raw_dump_pkt_file_[a]);
+    }
     drain_batch_queue();
     freeResources();
   }
@@ -100,7 +104,11 @@ class Hitek9081RxOp : public Operator {
     // GPU-accessible so we store payload pointers directly.
     for (int n = 0; n < num_concurrent; n++) {
       CUDA_TRY(cudaMallocHost((void**)&h_dev_ptrs_[n], sizeof(void*) * batch_size_.get()));
+      CUDA_TRY(cudaMallocHost((void**)&h_pkt_antenna_[n], batch_size_.get()));
       cudaEventCreate(&rx_events_[n]);
+    }
+    for (int a = 0; a < MAX_ANTENNAS; a++) {
+      CUDA_TRY(cudaMallocHost((void**)&h_ant_ptrs_[a], sizeof(void*) * batch_size_.get()));
     }
 
     const int N = fft_size_.get();
@@ -153,6 +161,8 @@ class Hitek9081RxOp : public Operator {
                "Complex samples per antenna per packet", 128);
     spec.param<int>(iq_format_, "iq_format", "IQ format",
                "0=pair-interleaved [I,Q,I,Q,...], 1=block-4 [IIII,QQQQ,...]", 1);
+    spec.param<uint32_t>(data_port_, "data_port", "Data port",
+               "Base UDP dst port for channel 0", 4096);
   }
 
   void compute(InputContext&, OutputContext& op_output, ExecutionContext&) override {
@@ -187,38 +197,50 @@ class Hitek9081RxOp : public Operator {
             continue;
           }
 
-          if (pkt_len > BTH_PSN_OFFSET + 3) {
-            uint32_t psn = (static_cast<uint32_t>(pkt_ptr[BTH_PSN_OFFSET + 1]) << 16) |
-                           (static_cast<uint32_t>(pkt_ptr[BTH_PSN_OFFSET + 2]) << 8) |
-                            static_cast<uint32_t>(pkt_ptr[BTH_PSN_OFFSET + 3]);
-            if (psn_log_count_ < 10) {
-              HOLOSCAN_LOG_INFO("PSN sample [{}]: raw bytes @{}: {:02x} {:02x} {:02x} {:02x} → PSN={}",
-                                psn_log_count_, BTH_PSN_OFFSET,
-                                pkt_ptr[BTH_PSN_OFFSET], pkt_ptr[BTH_PSN_OFFSET + 1],
-                                pkt_ptr[BTH_PSN_OFFSET + 2], pkt_ptr[BTH_PSN_OFFSET + 3], psn);
-              psn_log_count_++;
-            }
-            if (last_psn_valid_) {
-              uint32_t expected = (last_psn_ + 2) & 0x00FFFFFF;
-              if (psn != expected) {
-                uint32_t gap = ((psn - last_psn_) / 2 - 1) & 0x00FFFFFF;
-                ttl_psn_gaps_++;
-                ttl_psn_gap_pkts_ += gap;
-              }
-            }
-            last_psn_ = psn;
-            last_psn_valid_ = true;
+          int ant_id = 0;
+          if (pkt_len > UDP_DST_OFFSET + 1) {
+            uint16_t udp_dst = (static_cast<uint16_t>(pkt_ptr[UDP_DST_OFFSET]) << 8) |
+                                static_cast<uint16_t>(pkt_ptr[UDP_DST_OFFSET + 1]);
+            ant_id = static_cast<int>(udp_dst) - static_cast<int>(data_port_.get());
+            if (ant_id < 0 || ant_id >= MAX_ANTENNAS) ant_id = 0;
           }
 
           int payload_len = static_cast<int>(pkt_len) - static_cast<int>(header_size_.get());
-          if (payload_len <= 0 || payload_len > nom_payload_size_) {
-            aggr_pkts_recv_++;
-            continue;
+          if (payload_len <= 0 || payload_len > nom_payload_size_) continue;
+
+          uint32_t psn = 0;
+          if (pkt_len > BTH_PSN_OFFSET + 3) {
+            psn = (static_cast<uint32_t>(pkt_ptr[BTH_PSN_OFFSET + 1]) << 16) |
+                  (static_cast<uint32_t>(pkt_ptr[BTH_PSN_OFFSET + 2]) << 8) |
+                   static_cast<uint32_t>(pkt_ptr[BTH_PSN_OFFSET + 3]);
+            if (psn_log_count_ < 20) {
+              HOLOSCAN_LOG_INFO("PSN sample [{}] ant{}: PSN={}", psn_log_count_, ant_id, psn);
+              psn_log_count_++;
+            }
           }
 
-          h_dev_ptrs_[cur_batch_idx_][aggr_pkts_recv_] = pkt_ptr + header_size_.get();
+          dump_raw_samples(pkt_ptr, pkt_len, ant_id);
 
-          dump_raw_samples(pkt_ptr, pkt_len);
+          // Direct insertion — no reorder buffer
+          h_dev_ptrs_[cur_batch_idx_][aggr_pkts_recv_] = pkt_ptr + header_size_.get();
+          h_pkt_antenna_[cur_batch_idx_][aggr_pkts_recv_] = static_cast<uint8_t>(ant_id);
+
+          // High-water-mark PSN gap detection per antenna
+          if (last_psn_valid_[ant_id]) {
+            int32_t delta = static_cast<int32_t>((psn - last_psn_[ant_id]) & 0x00FFFFFF);
+            if (delta > 0x007FFFFF) delta -= 0x01000000;
+            if (delta > 0) {
+              uint32_t missed = (delta / 2) - 1;
+              if (missed > 0) {
+                ttl_psn_gaps_++;
+                ttl_psn_gaps_ant_[ant_id]++;
+              }
+              last_psn_[ant_id] = psn;
+            }
+          } else {
+            last_psn_[ant_id] = psn;
+          }
+          last_psn_valid_[ant_id] = true;
 
           ttl_data_frames_++;
           ttl_payload_bytes_ += payload_len;
@@ -243,12 +265,24 @@ class Hitek9081RxOp : public Operator {
       double secs = elapsed / 1000.0;
       int64_t delta_frames = ttl_data_frames_ - last_report_frames_;
       int64_t delta_bytes = ttl_payload_bytes_ - last_report_bytes_;
-      int64_t delta_psn_gaps = ttl_psn_gaps_ - last_report_psn_gaps_;
       double mfps = delta_frames / (secs * 1e6);
       double payload_gbps = delta_bytes * 8.0 / (secs * 1e9);
       double payload_mbps = delta_bytes / (secs * 1e6);
-      HOLOSCAN_LOG_INFO("RX: {:.3f} Mfps | {:.2f} Gbps ({:.0f} MB/s) | {} frames | PSN gaps: {}",
-                        mfps, payload_gbps, payload_mbps, ttl_data_frames_, delta_psn_gaps);
+      const int A = num_antennas_.get();
+      int64_t delta_gaps = ttl_psn_gaps_ - last_report_psn_gaps_;
+      if (A >= 2) {
+        int64_t d0 = ttl_psn_gaps_ant_[0] - last_report_psn_gaps_ant_[0];
+        int64_t d1 = ttl_psn_gaps_ant_[1] - last_report_psn_gaps_ant_[1];
+        HOLOSCAN_LOG_INFO("RX: {:.3f} Mfps | {:.2f} Gbps ({:.0f} MB/s) | {} frames | "
+                          "PSN gaps: {} (ant0:{} ant1:{})",
+                          mfps, payload_gbps, payload_mbps, ttl_data_frames_,
+                          delta_gaps, d0, d1);
+        for (int a = 0; a < A; a++)
+          last_report_psn_gaps_ant_[a] = ttl_psn_gaps_ant_[a];
+      } else {
+        HOLOSCAN_LOG_INFO("RX: {:.3f} Mfps | {:.2f} Gbps ({:.0f} MB/s) | {} frames | PSN gaps: {}",
+                          mfps, payload_gbps, payload_mbps, ttl_data_frames_, delta_gaps);
+      }
       last_report_frames_ = ttl_data_frames_;
       last_report_bytes_ = ttl_payload_bytes_;
       last_report_psn_gaps_ = ttl_psn_gaps_;
@@ -257,6 +291,7 @@ class Hitek9081RxOp : public Operator {
   }
 
  private:
+  static constexpr int MAX_ANTENNAS = 4;
   static constexpr int num_concurrent = 32;    // max in-flight batches. Sized for 1.5M pkt/s at batch_size=4096
   static constexpr int MAX_BURSTS_PER_BATCH = 256;
   static constexpr int NUM_ACCUM_BUFS = 32;   // ring depth > num_concurrent to prevent overwrite during GPU read
@@ -312,7 +347,7 @@ class Hitek9081RxOp : public Operator {
 
     int idx = cur_batch_idx_;
 
-    accumulate_batch(h_dev_ptrs_[idx]);
+    accumulate_batch(h_dev_ptrs_[idx], h_pkt_antenna_[idx]);
 
     cudaEventRecord(rx_events_[idx], accum_stream_);
     cur_batch_.evt = rx_events_[idx];
@@ -322,36 +357,56 @@ class Hitek9081RxOp : public Operator {
     cur_batch_idx_ = (cur_batch_idx_ + 1) % num_concurrent;
   }
 
-  void accumulate_batch(void** pkt_ptrs) {
+  void accumulate_batch(void** pkt_ptrs, uint8_t* pkt_antennas) {
+    const int A = num_antennas_.get();
     const int S = samples_per_antenna_.get();
     const int N = fft_size_.get();
-    const int pkts_in_batch = batch_size_.get();
-    int pkts_remaining = pkts_in_batch;
-    int pkt_offset = 0;
+    const int total_pkts = batch_size_.get();
 
-    while (pkts_remaining > 0) {
-      int samples_needed = N - accum_offset_;
-      int pkts_needed = (samples_needed + S - 1) / S;
-      int pkts_to_copy = std::min(pkts_needed, pkts_remaining);
-      int samples_to_copy = std::min(pkts_to_copy * S, samples_needed);
+    // Partition packets by antenna ID (from UDP dst port)
+    for (int a = 0; a < A; a++) ant_pkt_count_[a] = 0;
+    for (int i = 0; i < total_pkts; i++) {
+      int a = pkt_antennas[i];
+      if (a < A) {
+        h_ant_ptrs_[a][ant_pkt_count_[a]++] = pkt_ptrs[i];
+      }
+    }
 
-      for (int a = 0; a < num_antennas_.get(); a++) {
-        gather_iq_from_scattered(pkt_ptrs + pkt_offset,
+    // Accumulate each antenna independently
+    for (int a = 0; a < A; a++) {
+      int remaining = ant_pkt_count_[a];
+      int offset = 0;
+      while (remaining > 0) {
+        int needed = N - accum_offset_[a];
+        int pkts_needed = (needed + S - 1) / S;
+        int pkts_to_copy = std::min(pkts_needed, remaining);
+        int samples_to_copy = std::min(pkts_to_copy * S, needed);
+
+        gather_iq_from_scattered(h_ant_ptrs_[a] + offset,
                                  static_cast<int16_t*>(accum_bufs_[active_buf_][a]),
                                  pkts_to_copy, S,
-                                 accum_offset_, iq_format_.get(), accum_stream_);
-      }
+                                 accum_offset_[a], iq_format_.get(), accum_stream_);
 
-      accum_offset_ += samples_to_copy;
-      pkt_offset += pkts_to_copy;
-      pkts_remaining -= pkts_to_copy;
+        accum_offset_[a] += samples_to_copy;
+        offset += pkts_to_copy;
+        remaining -= pkts_to_copy;
 
-      if (accum_offset_ >= N) {
-        accum_offset_ = 0;
-        pending_emit_ = true;
-        pending_emit_buf_ = active_buf_;
-        active_buf_ = (active_buf_ + 1) % NUM_ACCUM_BUFS;
+        if (accum_offset_[a] >= N) {
+          accum_offset_[a] = 0;
+        }
       }
+    }
+
+    // Emit when antenna 0 has filled — zero stale data in next buffer
+    if (accum_offset_[0] == 0 && ant_pkt_count_[0] > 0) {
+      pending_emit_ = true;
+      pending_emit_buf_ = active_buf_;
+      int next_buf = (active_buf_ + 1) % NUM_ACCUM_BUFS;
+      for (int a = 0; a < A; a++) {
+        cudaMemsetAsync(accum_bufs_[next_buf][a], 0,
+                        N * 2 * sizeof(int16_t), accum_stream_);
+      }
+      active_buf_ = next_buf;
     }
   }
 
@@ -391,37 +446,55 @@ class Hitek9081RxOp : public Operator {
     op_output.emit(out_msg, "iq_out");
   }
 
-  void dump_raw_samples(const uint8_t* pkt_ptr, int pkt_len) {
-    if (raw_dump_samples_ >= fft_size_.get()) return;
+  void dump_raw_samples(const uint8_t* pkt_ptr, int pkt_len, int ant) {
+    if (ant < 0 || ant >= num_antennas_.get()) return;
+    if (raw_dump_samples_[ant] >= fft_size_.get()) return;
+
+    // 5-second delay for DPDK/JESD link stabilization
+    if (!dump_start_set_) {
+      dump_start_ = std::chrono::steady_clock::now();
+      dump_start_set_ = true;
+    }
+    if (!dump_ready_) {
+      if (std::chrono::steady_clock::now() - dump_start_ < std::chrono::seconds(5)) return;
+      dump_ready_ = true;
+      HOLOSCAN_LOG_INFO("=== Dump delay elapsed — capturing steady-state data ===");
+    }
 
     int num_samp = samples_per_antenna_.get();
     const int16_t* samples = reinterpret_cast<const int16_t*>(pkt_ptr + header_size_.get());
 
-    if (!raw_dump_file_) {
-      raw_dump_file_ = fopen("/tmp/hitek9081_raw_iq_dump.bin", "wb");
-      if (raw_dump_file_)
-        HOLOSCAN_LOG_INFO("=== Dumping {} samples to /tmp/hitek9081_raw_iq_dump.bin ===", fft_size_.get());
+    if (!raw_dump_file_[ant]) {
+      char path[128];
+      snprintf(path, sizeof(path), "/tmp/hitek9081_raw_iq_dump_ant%d.bin", ant);
+      raw_dump_file_[ant] = fopen(path, "wb");
+      if (raw_dump_file_[ant])
+        HOLOSCAN_LOG_INFO("=== Dumping {} samples to {} ===", fft_size_.get(), path);
     }
-    if (!raw_dump_pkt_file_) {
-      raw_dump_pkt_file_ = fopen("/tmp/hitek9081_raw_pkt_dump.pcap", "wb");
-      if (raw_dump_pkt_file_) {
+    if (!raw_dump_pkt_file_[ant]) {
+      char path[128];
+      snprintf(path, sizeof(path), "/tmp/hitek9081_raw_pkt_dump_ant%d.pcap", ant);
+      raw_dump_pkt_file_[ant] = fopen(path, "wb");
+      if (raw_dump_pkt_file_[ant]) {
         struct { uint32_t magic, ver, tz, sig, snaplen, linktype; }
           hdr = { 0xa1b2c3d4, (2u << 16) | 4u, 0, 0, 65535, 1 };
-        fwrite(&hdr, sizeof(hdr), 1, raw_dump_pkt_file_);
-        HOLOSCAN_LOG_INFO("=== Dumping full packets to /tmp/hitek9081_raw_pkt_dump.pcap ===");
+        fwrite(&hdr, sizeof(hdr), 1, raw_dump_pkt_file_[ant]);
+        HOLOSCAN_LOG_INFO("=== Dumping full packets to {} ===", path);
       }
     }
-    if (raw_dump_file_) {
-      int to_write = std::min(num_samp, fft_size_.get() - raw_dump_samples_);
-      fwrite(samples, sizeof(int16_t), to_write * 2, raw_dump_file_);
-      raw_dump_samples_ += to_write;
-      if (raw_dump_samples_ >= fft_size_.get()) {
-        fclose(raw_dump_file_);
-        raw_dump_file_ = nullptr;
-        HOLOSCAN_LOG_INFO("=== Raw IQ dump complete: {} complex samples written ===", raw_dump_samples_);
+    if (raw_dump_file_[ant]) {
+      int to_write = std::min(num_samp, fft_size_.get() - raw_dump_samples_[ant]);
+      fwrite(samples, sizeof(int16_t), to_write * 2, raw_dump_file_[ant]);
+      fflush(raw_dump_file_[ant]);
+      raw_dump_samples_[ant] += to_write;
+      if (raw_dump_samples_[ant] >= fft_size_.get()) {
+        fclose(raw_dump_file_[ant]);
+        raw_dump_file_[ant] = nullptr;
+        HOLOSCAN_LOG_INFO("=== Raw IQ dump ant{} complete: {} complex samples ===",
+                          ant, raw_dump_samples_[ant]);
       }
     }
-    if (raw_dump_pkt_file_) {
+    if (raw_dump_pkt_file_[ant]) {
       struct timespec ts;
       clock_gettime(CLOCK_REALTIME, &ts);
       uint32_t pkt_len32 = static_cast<uint32_t>(pkt_len);
@@ -429,12 +502,13 @@ class Hitek9081RxOp : public Operator {
         phdr = { static_cast<uint32_t>(ts.tv_sec),
                  static_cast<uint32_t>(ts.tv_nsec / 1000),
                  pkt_len32, pkt_len32 };
-      fwrite(&phdr, sizeof(phdr), 1, raw_dump_pkt_file_);
-      fwrite(pkt_ptr, 1, pkt_len, raw_dump_pkt_file_);
-      if (raw_dump_samples_ >= fft_size_.get()) {
-        fclose(raw_dump_pkt_file_);
-        raw_dump_pkt_file_ = nullptr;
-        HOLOSCAN_LOG_INFO("=== Full packet dump complete ===");
+      fwrite(&phdr, sizeof(phdr), 1, raw_dump_pkt_file_[ant]);
+      fwrite(pkt_ptr, 1, pkt_len, raw_dump_pkt_file_[ant]);
+      fflush(raw_dump_pkt_file_[ant]);
+      if (raw_dump_samples_[ant] >= fft_size_.get()) {
+        fclose(raw_dump_pkt_file_[ant]);
+        raw_dump_pkt_file_[ant] = nullptr;
+        HOLOSCAN_LOG_INFO("=== Full packet dump ant{} complete ===", ant);
       }
     }
   }
@@ -442,7 +516,11 @@ class Hitek9081RxOp : public Operator {
   void freeResources() {
     for (int n = 0; n < num_concurrent; n++) {
       if (h_dev_ptrs_[n]) cudaFreeHost(h_dev_ptrs_[n]);
+      if (h_pkt_antenna_[n]) cudaFreeHost(h_pkt_antenna_[n]);
       if (rx_events_[n]) cudaEventDestroy(rx_events_[n]);
+    }
+    for (int a = 0; a < MAX_ANTENNAS; a++) {
+      if (h_ant_ptrs_[a]) cudaFreeHost(h_ant_ptrs_[a]);
     }
     for (int b = 0; b < NUM_ACCUM_BUFS; b++) {
       for (auto p : accum_bufs_[b]) { if (p) cudaFree(p); }
@@ -463,23 +541,31 @@ class Hitek9081RxOp : public Operator {
   int64_t aggr_pkts_recv_ = 0;
   int64_t ttl_packets_dropped_ = 0;
   int64_t ttl_metadata_pkts_ = 0;
-  uint32_t last_psn_ = 0;
-  bool last_psn_valid_ = false;
+  uint32_t last_psn_[MAX_ANTENNAS] = {};
+  bool last_psn_valid_[MAX_ANTENNAS] = {};
   int64_t ttl_psn_gaps_ = 0;
-  int64_t ttl_psn_gap_pkts_ = 0;
+  int64_t ttl_psn_gaps_ant_[MAX_ANTENNAS] = {};
   int psn_log_count_ = 0;
-  int raw_dump_samples_ = 0;
-  FILE* raw_dump_file_ = nullptr;
-  FILE* raw_dump_pkt_file_ = nullptr;
+  int raw_dump_samples_[MAX_ANTENNAS] = {};
+  FILE* raw_dump_file_[MAX_ANTENNAS] = {};
+  FILE* raw_dump_pkt_file_[MAX_ANTENNAS] = {};
+  std::chrono::steady_clock::time_point dump_start_;
+  bool dump_start_set_ = false;
+  bool dump_ready_ = false;
   uint16_t nom_payload_size_;
   std::array<void**, num_concurrent> h_dev_ptrs_{};
+  std::array<uint8_t*, num_concurrent> h_pkt_antenna_{};
   std::array<cudaEvent_t, num_concurrent> rx_events_{};
 
-  // IQ accumulation
+  // Per-antenna packet demux scratch
+  void** h_ant_ptrs_[MAX_ANTENNAS] = {};
+  int ant_pkt_count_[MAX_ANTENNAS] = {};
+
+  // IQ accumulation — per-antenna offsets
   cudaStream_t accum_stream_ = nullptr;
   std::vector<void*> accum_bufs_[NUM_ACCUM_BUFS];
   int active_buf_ = 0;
-  int accum_offset_ = 0;
+  int accum_offset_[MAX_ANTENNAS] = {};
   bool pending_emit_ = false;
   int pending_emit_buf_ = 0;
 
@@ -496,12 +582,14 @@ class Hitek9081RxOp : public Operator {
   Parameter<int> num_antennas_;
   Parameter<int> samples_per_antenna_;
   Parameter<int> iq_format_;
+  Parameter<uint32_t> data_port_;
 
   // Throughput reporting
   std::chrono::steady_clock::time_point last_report_time_ = std::chrono::steady_clock::now();
   int64_t last_report_frames_ = 0;
   int64_t last_report_bytes_ = 0;
   int64_t last_report_psn_gaps_ = 0;
+  int64_t last_report_psn_gaps_ant_[MAX_ANTENNAS] = {};
 };
 
 }  // namespace holoscan::ops
