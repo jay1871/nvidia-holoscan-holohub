@@ -24,7 +24,8 @@
 #
 hsb:
   hololink_ip: "192.168.0.2"
-  payload_size: 3904
+  payload_size: 3968            # FPGA RoCE packet payload: 31 pages * 128 = 3968 bytes (992 IQ samples)
+  packets_per_frame: 10000      # 10000 data packets per 1 metadata packet (10000:1 ratio)
   mtu: 4096
   custom_header_size: 0
   data_port: 4096

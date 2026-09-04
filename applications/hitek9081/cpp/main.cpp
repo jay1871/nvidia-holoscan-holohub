@@ -345,6 +345,7 @@ void print_usage(const char* prog)
               << "  --fft-size N        FFT size (power of 2, 512-1048576, default: 65536)\n"
               << "  --num-averages N    FFTs to average (power of 2, 1-32, default: 1)\n"
               << "  --batch-size N      RX aggregation batch size (default: from YAML, typically 20480)\n"
+              << "  --packets-per-frame N Data packets per metadata packet (default: from YAML, typically 1000)\n"
               << "  --freq-min MHz      Display minimum frequency (default: center - sr/2)\n"
               << "  --freq-max MHz      Display maximum frequency (default: center + sr/2)\n"
               << "  --hololink IP       HSB data-plane IP (default: from YAML)\n"
@@ -365,6 +366,7 @@ void signalHandler(int signal_num) {
 
 int main(int argc, char** argv) {
   std::string hololink_ip_override;
+  uint32_t packets_per_frame_override = 0;
   AppConfig cfg;
   bool sr_set = false;
   bool cf_set = false;
@@ -377,6 +379,7 @@ int main(int argc, char** argv) {
       {"fft-size", required_argument, nullptr, 0},
       {"num-averages", required_argument, nullptr, 0},
       {"batch-size", required_argument, nullptr, 0},
+      {"packets-per-frame", required_argument, nullptr, 0},
       {"freq-min", required_argument, nullptr, 0},
       {"freq-max", required_argument, nullptr, 0},
       {"imgui", no_argument, nullptr, 0},
@@ -403,6 +406,8 @@ int main(int argc, char** argv) {
         cfg.num_averages = std::stoi(optarg);
       } else if (name == "batch-size") {
         cfg.batch_size = std::stoi(optarg);
+      } else if (name == "packets-per-frame") {
+        packets_per_frame_override = static_cast<uint32_t>(std::stoul(optarg));
       } else if (name == "freq-min") {
         cfg.freq_min_mhz = std::stod(optarg);
       } else if (name == "freq-max") {
@@ -496,15 +501,32 @@ int main(int argc, char** argv) {
   const std::string hololink_ip = hololink_ip_override.empty()
       ? hsb_cfg["hololink_ip"].as<std::string>("192.168.0.2")
       : hololink_ip_override;
-  const size_t frame_size = hsb_cfg["payload_size"].as<size_t>();
   const uint32_t mtu = hsb_cfg["mtu"].as<uint32_t>(1500);
   const uint32_t data_port = hsb_cfg["data_port"].as<uint32_t>();
   const uint32_t custom_header_size = hsb_cfg["custom_header_size"].as<uint32_t>(0);
 
+  // The FPGA RoCE packetizer operates in 128-byte pages and computes:
+  // payload_size = ((mtu - 74) / 128) * 128 (e.g. 3968 bytes for MTU 4096)
+  constexpr size_t HOLOLINK_PAGE_SIZE = 128;
+  constexpr uint32_t ROCE_OVERHEAD = 74;  // Eth(14)+IP(20)+UDP(8)+BTH(12)+RETH(16)+ICRC(4)
+  const size_t fpga_payload_size = ((mtu - ROCE_OVERHEAD) / HOLOLINK_PAGE_SIZE) * HOLOLINK_PAGE_SIZE;
+
+  size_t packet_payload_size = hsb_cfg["payload_size"].as<size_t>(fpga_payload_size);
+  if (packet_payload_size != fpga_payload_size) {
+    HOLOSCAN_LOG_WARN("YAML payload_size ({}) does not match FPGA packetizer size ({}) for MTU {}. Using {} to match FPGA.",
+                      packet_payload_size, fpga_payload_size, mtu, fpga_payload_size);
+    packet_payload_size = fpga_payload_size;
+  }
+
+  const uint32_t packets_per_frame = (packets_per_frame_override > 0)
+      ? packets_per_frame_override
+      : hsb_cfg["packets_per_frame"].as<uint32_t>(1000);
+  const size_t frame_size = packet_payload_size * packets_per_frame;
+
   // Compute derived RX operator parameters from hsb config
   constexpr uint32_t ROCE_HEADER_SIZE = 70;  // Eth(14)+IP(20)+UDP(8)+BTH(12)+RETH(16)
   constexpr uint32_t ICRC_SIZE = 4;
-  const uint16_t max_packet_size = static_cast<uint16_t>(ROCE_HEADER_SIZE + frame_size + ICRC_SIZE);
+  const uint16_t max_packet_size = static_cast<uint16_t>(ROCE_HEADER_SIZE + packet_payload_size + ICRC_SIZE);
   const uint16_t header_size = static_cast<uint16_t>(ROCE_HEADER_SIZE + custom_header_size);
 
   cfg.num_antennas = yaml["hitek9081_rx"]["num_antennas"].as<int>(1);
@@ -513,13 +535,13 @@ int main(int argc, char** argv) {
   cfg.header_size = header_size;
   cfg.data_port = data_port;
   // Each channel arrives as separate packets on its own UDP port
-  cfg.samples_per_antenna = static_cast<int>((frame_size - custom_header_size) / 4);
+  cfg.samples_per_antenna = static_cast<int>((packet_payload_size - custom_header_size) / 4);
   if (cfg.batch_size == 0) {
     cfg.batch_size = yaml["hitek9081_rx"]["batch_size"].as<int>(20480);
   }
 
-  HOLOSCAN_LOG_INFO("HSB config: payload_size={} mtu={} custom_header_size={} data_port={} num_antennas={} batch_size={}",
-                    frame_size, mtu, custom_header_size, data_port, cfg.num_antennas, cfg.batch_size);
+  HOLOSCAN_LOG_INFO("HSB config: pkt_payload={} frame_size={} ({} pkts/frame) mtu={} data_port={} num_antennas={} batch_size={}",
+                    packet_payload_size, frame_size, packets_per_frame, mtu, data_port, cfg.num_antennas, cfg.batch_size);
   HOLOSCAN_LOG_INFO("Computed RX params: max_packet_size={} header_size={} samples_per_antenna={} nom_payload_size={}",
                     cfg.max_packet_size, cfg.header_size, cfg.samples_per_antenna,
                     cfg.max_packet_size - cfg.header_size);
@@ -528,7 +550,6 @@ int main(int argc, char** argv) {
   cfg.db_min = yaml["spectral"]["db_min"].as<float>(20.0f);
   cfg.db_max = yaml["spectral"]["db_max"].as<float>(120.0f);
 
-  constexpr size_t HOLOLINK_PAGE_SIZE = 128;
   constexpr size_t HOLOLINK_METADATA_SIZE = 128;
   const size_t metadata_address = ((frame_size + HOLOLINK_PAGE_SIZE - 1) / HOLOLINK_PAGE_SIZE) * HOLOLINK_PAGE_SIZE;
   const size_t page_size = metadata_address + HOLOLINK_METADATA_SIZE;
@@ -620,10 +641,10 @@ int main(int argc, char** argv) {
   // MTU was injected into channel_metadata before DataChannel construction,
   // so configure_roce() → configure_common() computes DP_PACKET_SIZE natively
   // using our MTU value instead of the hardcoded DEFAULT_MTU (1500).
-  const uint32_t pkt_payload = std::min(mtu, static_cast<uint32_t>(frame_size));
+  const uint32_t pkt_payload = std::min(mtu, static_cast<uint32_t>(packet_payload_size));
   const uint32_t pkt_pages = (pkt_payload + 127) / 128;
-  HOLOSCAN_LOG_INFO("FPGA dataplane programmed: port={} payload_size={} page_size={} mtu={} pkt_pages={}",
-                    data_port, frame_size, page_size, mtu, pkt_pages);
+  HOLOSCAN_LOG_INFO("FPGA dataplane programmed: port={} frame_size={} ({} pkts/frame) page_size={} mtu={} pkt_pages={}",
+                    data_port, frame_size, packets_per_frame, page_size, mtu, pkt_pages);
 
   std::signal(SIGINT, signalHandler);
   std::signal(SIGTERM, signalHandler);

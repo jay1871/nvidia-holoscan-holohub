@@ -154,6 +154,7 @@ class Hitek9081RxOp : public Operator {
       last_report_psn_ooo_ant_[a] = 0;
     }
     psn_log_count_ = 0;
+    payload_drop_log_count_ = 0;
     ttl_psn_gaps_ = 0;
     last_report_psn_gaps_ = 0;
 
@@ -240,12 +241,6 @@ class Hitek9081RxOp : public Operator {
           auto pkt_ptr = reinterpret_cast<uint8_t*>(get_segment_packet_ptr(burst, 0, p));
           auto pkt_len = get_segment_packet_length(burst, 0, p);
 
-          if (pkt_len > BTH_OPCODE_OFFSET &&
-              pkt_ptr[BTH_OPCODE_OFFSET] == ROCE_WRITE_ONLY_IMM) {
-            ttl_metadata_pkts_++;
-            continue;
-          }
-
           // Decode antenna ID directly from UDP destination port (port 4096 = ant0, 4097 = ant1, etc.)
           int ant_id = 0;
           if (pkt_len > UDP_DST_OFFSET + 1) {
@@ -255,14 +250,30 @@ class Hitek9081RxOp : public Operator {
             if (ant_id < 0 || ant_id >= cached_num_antennas_) continue;
           }
 
-          int payload_len = static_cast<int>(pkt_len) - static_cast<int>(hdr_size);
-          if (payload_len <= 0 || payload_len > nom_payload_size_) continue;
-
           uint32_t psn = 0;
           if (pkt_len > BTH_PSN_OFFSET + 3) {
             psn = (static_cast<uint32_t>(pkt_ptr[BTH_PSN_OFFSET + 1]) << 16) |
                   (static_cast<uint32_t>(pkt_ptr[BTH_PSN_OFFSET + 2]) << 8) |
                    static_cast<uint32_t>(pkt_ptr[BTH_PSN_OFFSET + 3]);
+          }
+
+          if (pkt_len > BTH_OPCODE_OFFSET &&
+              pkt_ptr[BTH_OPCODE_OFFSET] == ROCE_WRITE_ONLY_IMM) {
+            ttl_metadata_pkts_++;
+            // Update last_psn so the metadata packet in sequence does not trigger a false gap
+            last_psn_[ant_id] = psn;
+            last_psn_valid_[ant_id] = true;
+            continue;
+          }
+
+          int payload_len = static_cast<int>(pkt_len) - static_cast<int>(hdr_size);
+          if (payload_len <= 0 || payload_len > nom_payload_size_) {
+            if (payload_drop_log_count_ < 8) {
+              HOLOSCAN_LOG_WARN("Dropping packet ant{}: pkt_len={} hdr_size={} payload_len={} nom_payload_size_={}",
+                                ant_id, pkt_len, hdr_size, payload_len, nom_payload_size_);
+              payload_drop_log_count_++;
+            }
+            continue;
           }
 
           if (dumping) dump_raw_samples(pkt_ptr, pkt_len, ant_id);
@@ -277,8 +288,7 @@ class Hitek9081RxOp : public Operator {
             if (delta > 0) {
               int32_t step = expected_psn_step_ant_[ant_id];
               if (step <= 0) {
-                // Hitek RoCE increments PSN by 2 per data packet (odd PSNs are metadata packets)
-                step = (delta <= 2) ? delta : 2;
+                step = (delta <= 2) ? delta : 1;
                 expected_psn_step_ant_[ant_id] = step;
               }
               int32_t missed = (delta / step) - 1;
@@ -671,6 +681,7 @@ class Hitek9081RxOp : public Operator {
   bool dump_ant_seen_[MAX_ANTENNAS] = {};
   int dump_ant_seen_count_ = 0;
   uint16_t nom_payload_size_;
+  int payload_drop_log_count_ = 0;
   std::array<cudaEvent_t, num_concurrent> rx_events_{};
 
   // Direct per-batch, per-antenna packet pointers (pre-segregated, zero-copy)

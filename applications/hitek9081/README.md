@@ -85,7 +85,8 @@ First launch compiles TRT engine (30-60s, before DAQIRI — no packet loss).
 | Parameter | Description |
 |-----------|-------------|
 | `hsb.hololink_ip` | FPGA data-plane IP |
-| `hsb.payload_size` | Payload bytes per packet |
+| `hsb.payload_size` | RoCE data packet payload (3968 B = 31 pages × 128 B, 992 IQ samples) |
+| `hsb.packets_per_frame` | Data packets per metadata packet (default: 1000, supports up to 100000:1) |
 | `hsb.mtu` | Max RoCE payload (≥ payload_size, max 4096) |
 | `hsb.data_port` | UDP dst port (match flow rule; ant0=4096, ant1=4097, etc.) |
 | `hitek9081_rx.batch_size` | Packets per batch (default: 20480, tuned for 100 GbE line rate) |
@@ -111,6 +112,7 @@ First launch compiles TRT engine (30-60s, before DAQIRI — no packet loss).
 | `--fft-size N` | FFT size, power of 2 | 65536 |
 | `--num-averages N` | Linear power averaging | 1 |
 | `--batch-size N` | RX aggregation burst size | YAML (20480) |
+| `--packets-per-frame N` | Data packets per metadata packet | YAML (1000) |
 | `--freq-min/max MHz` | Display frequency range | full band |
 | `--hololink IP` | Override FPGA IP | YAML |
 | `--imgui` | ImGui display (required for DDC/AMC) | Holoviz |
@@ -121,8 +123,17 @@ First launch compiles TRT engine (30-60s, before DAQIRI — no packet loss).
 ./build/hitek9081/applications/hitek9081/cpp/hitek9081 \
   /workspace/holohub/applications/hitek9081/hitek9081.yaml \
   --sr 491.52 --center-freq 750 --fft-size 65536 --num-averages 4 \
-  --freq-min 700 --freq-max 800 --imgui --batch-size 4096
+  --freq-min 700 --freq-max 800 --packets-per-frame 1000 --imgui
 ```
+
+### Reducing Network & CPU Overhead (`packets_per_frame`)
+
+The Hololink FPGA packetizer generates an End-of-Frame (EOF) metadata packet (`0x2B` RDMA WRITE ONLY WITH IMMEDIATE) when `frame_size` bytes have been transmitted.
+
+- **Previous 1:1 Ratio**: Previously, `frame_size` was set equal to a single packet's payload size, causing the FPGA to emit an EOF metadata packet after **every single data packet** (1:1 ratio). At 4 channels @ 491.52 MSPS, this flooded the wire with ~2.0 million metadata packets/sec (over 4.0 Mfps total), wasting ~4 Gbps of link bandwidth and heavily loading DPDK RX Core 16.
+- **Configurable `packets_per_frame` (1,000:1 to 100,000:1)**: Decouples single-packet payload ($3968\text{ B} = 992\text{ samples}$) from FPGA frame size ($\text{frame\_size} = \text{payload} \times \text{packets\_per\_frame}$).
+  - **1,000:1 ratio**: Cuts total packet rate nearly in half (from ~4.02 Mfps down to **~1.98 Mfps** at 4 channels @ 491.52 MSPS), eliminates 99.9% of metadata packets (~1,980/s remaining), saves ~4 Gbps on the wire, and relieves DPDK Core 16 of ~2 million descriptor polls/sec.
+  - **100,000:1 ratio**: Achievable via `--packets-per-frame 100000`, reducing metadata packets to ~20 packets/s across all 4 channels without affecting RF streaming.
 
 ### Performance & Frame Rates
 
