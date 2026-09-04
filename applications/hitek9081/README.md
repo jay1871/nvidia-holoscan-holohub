@@ -1,4 +1,4 @@
-# HTK9081 Spectrum Analyzer + AMC
+# Spectrum Analyzer + DDC + AMC
 
 Real-time wideband spectrum analysis with CUDA DDC and TensorRT modulation classification.
 
@@ -87,8 +87,9 @@ First launch compiles TRT engine (30-60s, before DAQIRI — no packet loss).
 | `hsb.hololink_ip` | FPGA data-plane IP |
 | `hsb.payload_size` | Payload bytes per packet |
 | `hsb.mtu` | Max RoCE payload (≥ payload_size, max 4096) |
-| `hsb.data_port` | UDP dst port (match flow rule) |
-| `hitek9081_rx.batch_size` | Packets per batch |
+| `hsb.data_port` | UDP dst port (match flow rule; ant0=4096, ant1=4097, etc.) |
+| `hitek9081_rx.batch_size` | Packets per batch (default: 20480, tuned for 100 GbE line rate) |
+| `hitek9081_rx.num_antennas` | Number of ADC channels (1, 2, or 4) |
 | `hitek9081_rx.iq_format` | 0=pair-interleaved, 1=block-4 |
 | `spectral.iq_swap` | 0=as-is, 1=swap (JESD lanes), 2=conjugate (upper sideband) |
 | `spectral.adc_bits` | ADC resolution (e.g., 16) |
@@ -109,18 +110,24 @@ First launch compiles TRT engine (30-60s, before DAQIRI — no packet loss).
 | `--center-freq MHz` | Center frequency (required) | — |
 | `--fft-size N` | FFT size, power of 2 | 65536 |
 | `--num-averages N` | Linear power averaging | 1 |
+| `--batch-size N` | RX aggregation burst size | YAML (20480) |
 | `--freq-min/max MHz` | Display frequency range | full band |
 | `--hololink IP` | Override FPGA IP | YAML |
 | `--imgui` | ImGui display (required for DDC/AMC) | Holoviz |
 | `--waterfall` | Scrolling spectrogram (implies `--imgui`) | line plot |
 
 ```bash
-# ImGui + AMC
+# 4-Channel Mode @ 491.52 MSPS with ImGui
 ./build/hitek9081/applications/hitek9081/cpp/hitek9081 \
   /workspace/holohub/applications/hitek9081/hitek9081.yaml \
-  --sr 983.04 --center-freq 750 --fft-size 32768 --num-averages 4 \
-  --freq-min 700 --freq-max 800 --imgui
+  --sr 491.52 --center-freq 750 --fft-size 65536 --num-averages 4 \
+  --freq-min 700 --freq-max 800 --imgui --batch-size 4096
 ```
+
+### Performance & Frame Rates
+
+The ImGui window title reports live GPU DSP pipeline throughput:
+`Spectrum + DDC | <min> - <max> MHz | Spectrum: XX.X FPS`
 
 ## DDC + AMC
 

@@ -55,6 +55,7 @@ class ImGuiDisplay {
   std::array<FrameBuffer, NUM_BUFS> buffers_;
   std::atomic<int> latest_ready_{-1};
   std::atomic<int> reading_{-1};
+  std::atomic<uint64_t> pipeline_frames_{0};
   int write_idx_ = 0;
 
   // Waterfall circular buffer: [antenna][history * num_bins]

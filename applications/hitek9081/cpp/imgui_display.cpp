@@ -11,8 +11,10 @@
 #include <cstdio>
 #include <cstring>
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <string>
+#include <thread>
 
 // 16 distinguishable DDC overlay colors (transparent for shading)
 static const ImVec4 DDC_COLORS[16] = {
@@ -66,6 +68,7 @@ void ImGuiDisplay::submit_frame(int antenna, const float* db_data, int num_bins)
 }
 
 void ImGuiDisplay::frame_complete() {
+  pipeline_frames_.fetch_add(1, std::memory_order_relaxed);
   latest_ready_.store(write_idx_, std::memory_order_release);
   // Advance write_idx, skipping the buffer the reader currently holds
   int next = (write_idx_ + 1) % NUM_BUFS;
@@ -106,7 +109,7 @@ void ImGuiDisplay::render_loop() {
   glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
 
   char title[256];
-  snprintf(title, sizeof(title), "HTK9081 Spectrum + DDC | %.1f - %.1f MHz",
+  snprintf(title, sizeof(title), "Spectrum + DDC | %.1f - %.1f MHz",
            cfg_.freq_min_mhz, cfg_.freq_max_mhz);
 
   GLFWwindow* window = glfwCreateWindow(1920, 1080, title, nullptr, nullptr);
@@ -118,7 +121,7 @@ void ImGuiDisplay::render_loop() {
   }
 
   glfwMakeContextCurrent(window);
-  glfwSwapInterval(0);
+  glfwSwapInterval(1);
 
   IMGUI_CHECKVERSION();
   ImGui::CreateContext();
@@ -128,11 +131,30 @@ void ImGuiDisplay::render_loop() {
   ImGui_ImplOpenGL3_Init("#version 330");
   ImPlot::GetInputMap().Select = ImGuiMouseButton_Middle;
 
+  auto last_fps_time = std::chrono::steady_clock::now();
+  uint64_t last_pipeline_frames = 0;
+
   while (running_.load() && !glfwWindowShouldClose(window)) {
+    auto frame_start = std::chrono::steady_clock::now();
     glfwPollEvents();
 
     cur_read_idx_ = latest_ready_.load(std::memory_order_acquire);
     reading_.store(cur_read_idx_, std::memory_order_release);
+
+    auto now = std::chrono::steady_clock::now();
+    auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_fps_time).count();
+    if (elapsed_ms >= 1000) {
+      uint64_t cur_pipe = pipeline_frames_.load(std::memory_order_relaxed);
+      float spec_fps = ((cur_pipe - last_pipeline_frames) * 1000.0f) / elapsed_ms;
+      last_pipeline_frames = cur_pipe;
+      last_fps_time = now;
+
+      char new_title[256];
+      snprintf(new_title, sizeof(new_title),
+               "Spectrum + DDC | %.1f - %.1f MHz | Spectrum: %.1f FPS",
+               cfg_.freq_min_mhz, cfg_.freq_max_mhz, spec_fps);
+      glfwSetWindowTitle(window, new_title);
+    }
 
     ImGui_ImplOpenGL3_NewFrame();
     ImGui_ImplGlfw_NewFrame();
@@ -172,6 +194,12 @@ void ImGuiDisplay::render_loop() {
     glClear(GL_COLOR_BUFFER_BIT);
     ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
     glfwSwapBuffers(window);
+
+    auto frame_dur = std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now() - frame_start).count();
+    if (frame_dur < 8000) {  // Cap at ~125 FPS max
+      std::this_thread::sleep_for(std::chrono::microseconds(8000 - frame_dur));
+    }
   }
 
   ImGui_ImplOpenGL3_Shutdown();

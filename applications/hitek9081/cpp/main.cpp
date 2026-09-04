@@ -143,6 +143,7 @@ struct AppConfig {
   uint16_t header_size = 70;
   int samples_per_antenna = 128;
   uint32_t data_port = 4096;
+  int batch_size = 0;
 
   // Integer-MHz frequency ticks for the display grid (computed once, capped at 11)
   std::vector<double> tick_freqs_mhz;   // actual MHz values for labels
@@ -185,6 +186,7 @@ class App : public holoscan::Application {
         Arg("samples_per_antenna", cfg_.samples_per_antenna),
         Arg("iq_format", cfg_.iq_format),
         Arg("data_port", cfg_.data_port),
+        Arg("batch_size", static_cast<uint32_t>(cfg_.batch_size)),
         this->is_alive);
 
     // Compute display bin range from frequency zoom settings.
@@ -342,6 +344,7 @@ void print_usage(const char* prog)
               << "Options:\n"
               << "  --fft-size N        FFT size (power of 2, 512-1048576, default: 65536)\n"
               << "  --num-averages N    FFTs to average (power of 2, 1-32, default: 1)\n"
+              << "  --batch-size N      RX aggregation batch size (default: from YAML, typically 20480)\n"
               << "  --freq-min MHz      Display minimum frequency (default: center - sr/2)\n"
               << "  --freq-max MHz      Display maximum frequency (default: center + sr/2)\n"
               << "  --hololink IP       HSB data-plane IP (default: from YAML)\n"
@@ -373,6 +376,7 @@ int main(int argc, char** argv) {
       {"center-freq", required_argument, nullptr, 0},
       {"fft-size", required_argument, nullptr, 0},
       {"num-averages", required_argument, nullptr, 0},
+      {"batch-size", required_argument, nullptr, 0},
       {"freq-min", required_argument, nullptr, 0},
       {"freq-max", required_argument, nullptr, 0},
       {"imgui", no_argument, nullptr, 0},
@@ -397,6 +401,8 @@ int main(int argc, char** argv) {
         cfg.fft_size = std::stoi(optarg);
       } else if (name == "num-averages") {
         cfg.num_averages = std::stoi(optarg);
+      } else if (name == "batch-size") {
+        cfg.batch_size = std::stoi(optarg);
       } else if (name == "freq-min") {
         cfg.freq_min_mhz = std::stod(optarg);
       } else if (name == "freq-max") {
@@ -508,9 +514,12 @@ int main(int argc, char** argv) {
   cfg.data_port = data_port;
   // Each channel arrives as separate packets on its own UDP port
   cfg.samples_per_antenna = static_cast<int>((frame_size - custom_header_size) / 4);
+  if (cfg.batch_size == 0) {
+    cfg.batch_size = yaml["hitek9081_rx"]["batch_size"].as<int>(20480);
+  }
 
-  HOLOSCAN_LOG_INFO("HSB config: payload_size={} mtu={} custom_header_size={} data_port={} num_antennas={}",
-                    frame_size, mtu, custom_header_size, data_port, cfg.num_antennas);
+  HOLOSCAN_LOG_INFO("HSB config: payload_size={} mtu={} custom_header_size={} data_port={} num_antennas={} batch_size={}",
+                    frame_size, mtu, custom_header_size, data_port, cfg.num_antennas, cfg.batch_size);
   HOLOSCAN_LOG_INFO("Computed RX params: max_packet_size={} header_size={} samples_per_antenna={} nom_payload_size={}",
                     cfg.max_packet_size, cfg.header_size, cfg.samples_per_antenna,
                     cfg.max_packet_size - cfg.header_size);

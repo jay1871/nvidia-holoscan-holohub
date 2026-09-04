@@ -153,7 +153,8 @@ class SpectralOp : public Operator {
         }
       }
       pipeline_.process(iq_ptrs, valid);
-      if (pipeline_.has_new_result()) has_result_ = true;
+      bool has_new = pipeline_.has_new_result();
+      if (has_new) has_result_ = true;
 
       // Process active DDC channels on raw IQ + run AMC classification
       for (int s = 0; s < NUM_DDC_SLOTS; s++) {
@@ -169,12 +170,10 @@ class SpectralOp : public Operator {
       }
     }
 
-    if (has_result_) {
-      if (output_mode_.get() == 0) {
-        holoviz_output_.emit(pipeline_, op_output);
-      } else {
-        emit_raw_db(op_output);
-      }
+    if (output_mode_.get() == 0) {
+      if (has_result_) holoviz_output_.emit(pipeline_, op_output);
+    } else {
+      if (pipeline_.has_new_result()) emit_raw_db(op_output);
     }
   }
 
