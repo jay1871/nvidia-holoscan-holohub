@@ -126,8 +126,12 @@ add_executable(hitek9081
   spectral_kernels.cu
   ddc_kernels.cu
   hsb_device_manager.cpp
+  hitek9081_rx_op.cpp
+  spectral_op.cpp
+  app.cpp
   main.cpp
   $<$<BOOL:${HITEK9081_IMGUI}>:imgui_display.cpp>
+  $<$<BOOL:${HITEK9081_IMGUI}>:imgui_sink_op.cpp>
 )
 set_target_properties(hitek9081 PROPERTIES CUDA_ARCHITECTURES "90;120;121")
 find_library(NVINFER_LIB nvinfer PATHS /usr/lib/aarch64-linux-gnu /usr/lib/x86_64-linux-gnu)

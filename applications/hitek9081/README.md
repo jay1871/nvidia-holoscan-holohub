@@ -112,18 +112,18 @@ First launch compiles TRT engine (30-60s, before DAQIRI — no packet loss).
 | `--fft-size N` | FFT size, power of 2 | 65536 |
 | `--num-averages N` | Linear power averaging | 1 |
 | `--batch-size N` | RX aggregation burst size | YAML (20480) |
-| `--packets-per-frame N` | Data packets per metadata packet | YAML (1000) |
+| `--packets-per-frame N` | Data packets per metadata packet | YAML (100000) |
 | `--freq-min/max MHz` | Display frequency range | full band |
 | `--hololink IP` | Override FPGA IP | YAML |
-| `--imgui` | ImGui display (required for DDC/AMC) | Holoviz |
+| `--imgui` | ImGui display | Default |
+| `--holoviz` | Use Holoviz renderer instead of ImGui | — |
 | `--waterfall` | Scrolling spectrogram (implies `--imgui`) | line plot |
 
 ```bash
-# 4-Channel Mode @ 491.52 MSPS with ImGui
+# 4-Channel Mode @ 491.52 MSPS (ImGui default)
 ./build/hitek9081/applications/hitek9081/cpp/hitek9081 \
   /workspace/holohub/applications/hitek9081/hitek9081.yaml \
-  --sr 491.52 --center-freq 750 --fft-size 65536 --num-averages 4 \
-  --freq-min 700 --freq-max 800 --packets-per-frame 1000 --imgui
+  --sr 491.52 --center-freq 750 --fft-size 65536 --num-averages 4
 ```
 
 ### Reducing Network & CPU Overhead (`packets_per_frame`)
@@ -167,17 +167,22 @@ Classification: EMA (α=0.3) + 5% hysteresis. Per-slot state, reset on clear/ret
 ## Architecture
 
 ```
-spectral_pipeline.h    — DSP: window → FFT → magnitude (no display deps)
-holoviz_output.h       — Holoviz: grid overlays + coord normalization
-spectral_op.h          — Holoscan wrapper: DSP + DDC + AMC routing
-ddc_channel.h          — DDC: NCO → FIR → decimate → normalize
-ddc_kernels.cu/cuh     — CUDA: NCO, FIR (shared mem), decimate, STFT, normalize
-amc_inference.h        — TensorRT: engine cache, inference, family grouping
-amc_constants.h        — Shared constants (class/family counts)
-imgui_display.h/cpp    — ImGui render thread (no CUDA deps)
-imgui_sink_op.h        — GPU→CPU bridge + DDC sync
-hitek9081_rx_op.h      — Zero-copy DPDK RX
-spectral_kernels.cu    — FFT pipeline kernels (downsample uses float stride)
+main.cpp                 — CLI parsing, signal handling, and execution harness
+app.h/cpp                — Holoscan application orchestration and pipeline composition
+app_config.h             — Unified application and CLI configuration
+hsb_device_manager.h/cpp — FPGA discovery, RoCE config, JESD synchronization, TRT pre-build
+ddc_manager.h            — Thread-safe multi-channel DDC manager and AMC dispatch
+spectral_pipeline.h      — DSP core: window → FFT → magnitude (no display deps)
+holoviz_output.h         — Holoviz: grid overlays + coordinate normalization
+spectral_op.h/cpp        — Holoscan operator: DSP execution + DDC/AMC routing
+ddc_channel.h            — DDC channel: NCO → FIR → decimate → normalize
+ddc_kernels.cu/cuh       — CUDA kernels: NCO, FIR, decimate, STFT, normalize
+amc_inference.h          — TensorRT: engine cache, inference, family grouping
+amc_constants.h          — Shared constants (class/family counts)
+imgui_display.h/cpp      — ImGui render thread (no CUDA deps)
+imgui_sink_op.h/cpp      — GPU→CPU bridge + DDC sync
+hitek9081_rx_op.h/cpp    — Zero-copy DPDK RX operator
+spectral_kernels.cu/cuh  — FFT pipeline & scatter-gather CUDA kernels
 ```
 
 ## Zero-Copy RX

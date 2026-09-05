@@ -155,10 +155,3 @@ spectral:
   db_min: -120.0
   db_max: -10.0
 
-# =============================================================================
-# DDCOp — Digital Down-Converter (placeholder)
-# =============================================================================
-ddc:
-  enabled: false
-  center_frequency_hz: 3.5e9
-  bandwidth_hz: 1.0e6
