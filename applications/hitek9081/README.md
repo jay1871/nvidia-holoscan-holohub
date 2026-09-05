@@ -167,22 +167,28 @@ Classification: EMA (α=0.3) + 5% hysteresis. Per-slot state, reset on clear/ret
 ## Architecture
 
 ```
-main.cpp                 — CLI parsing, signal handling, and execution harness
-app.h/cpp                — Holoscan application orchestration and pipeline composition
-app_config.h             — Unified application and CLI configuration
-hsb_device_manager.h/cpp — FPGA discovery, RoCE config, JESD synchronization, TRT pre-build
-ddc_manager.h            — Thread-safe multi-channel DDC manager and AMC dispatch
-spectral_pipeline.h      — DSP core: window → FFT → magnitude (no display deps)
-holoviz_output.h         — Holoviz: grid overlays + coordinate normalization
-spectral_op.h/cpp        — Holoscan operator: DSP execution + DDC/AMC routing
-ddc_channel.h            — DDC channel: NCO → FIR → decimate → normalize
-ddc_kernels.cu/cuh       — CUDA kernels: NCO, FIR, decimate, STFT, normalize
-amc_inference.h          — TensorRT: engine cache, inference, family grouping
-amc_constants.h          — Shared constants (class/family counts)
-imgui_display.h/cpp      — ImGui render thread (no CUDA deps)
-imgui_sink_op.h/cpp      — GPU→CPU bridge + DDC sync
-hitek9081_rx_op.h/cpp    — Zero-copy DPDK RX operator
-spectral_kernels.cu/cuh  — FFT pipeline & scatter-gather CUDA kernels
+cpp/
+├── main.cpp                     — CLI parsing, signal handling, and execution harness
+├── app.h / app.cpp              — Holoscan application orchestration and pipeline composition
+├── app_config.h                 — Unified application and CLI configuration
+├── hardware/
+│   ├── hsb_device_manager.h     — FPGA discovery, RoCE config, JESD link synchronization
+│   └── hsb_device_manager.cpp
+├── operators/
+│   ├── hitek9081_rx_op.h / .cpp — Zero-copy DPDK RX operator
+│   ├── spectral_op.h / .cpp     — Holoscan operator: DSP execution + DDC/AMC routing
+│   └── imgui_sink_op.h / .cpp   — GPU→CPU bridge + DDC sync
+├── dsp/
+│   ├── spectral_pipeline.h      — DSP core: window → FFT → magnitude (no display deps)
+│   ├── spectral_kernels.cu/.cuh — FFT pipeline & scatter-gather CUDA kernels
+│   ├── ddc_manager.h            — Thread-safe multi-channel DDC manager and AMC dispatch
+│   ├── ddc_channel.h            — DDC channel: NCO → FIR → decimate → normalize
+│   ├── ddc_kernels.cu/.cuh      — CUDA kernels: NCO, FIR, decimate, STFT, normalize
+│   ├── amc_inference.h          — TensorRT: engine cache, inference, family grouping
+│   └── amc_constants.h          — Shared constants (class/family counts)
+└── ui/
+    ├── imgui_display.h / .cpp   — ImGui render thread (no CUDA deps)
+    └── holoviz_output.h         — Holoviz: grid overlays + coordinate normalization
 ```
 
 ## Zero-Copy RX

@@ -123,19 +123,28 @@ endif()
 # Application
 # ---------------------------------------------------------------------------
 add_executable(hitek9081
-  spectral_kernels.cu
-  ddc_kernels.cu
-  hsb_device_manager.cpp
-  hitek9081_rx_op.cpp
-  spectral_op.cpp
+  dsp/spectral_kernels.cu
+  dsp/ddc_kernels.cu
+  hardware/hsb_device_manager.cpp
+  operators/hitek9081_rx_op.cpp
+  operators/spectral_op.cpp
   app.cpp
   main.cpp
-  $<$<BOOL:${HITEK9081_IMGUI}>:imgui_display.cpp>
-  $<$<BOOL:${HITEK9081_IMGUI}>:imgui_sink_op.cpp>
+  $<$<BOOL:${HITEK9081_IMGUI}>:ui/imgui_display.cpp>
+  $<$<BOOL:${HITEK9081_IMGUI}>:operators/imgui_sink_op.cpp>
 )
 set_target_properties(hitek9081 PROPERTIES CUDA_ARCHITECTURES "90;120;121")
 find_library(NVINFER_LIB nvinfer PATHS /usr/lib/aarch64-linux-gnu /usr/lib/x86_64-linux-gnu)
 find_library(NVONNXPARSER_LIB nvonnxparser PATHS /usr/lib/aarch64-linux-gnu /usr/lib/x86_64-linux-gnu)
+
+target_include_directories(hitek9081
+  PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/hardware
+    ${CMAKE_CURRENT_SOURCE_DIR}/operators
+    ${CMAKE_CURRENT_SOURCE_DIR}/dsp
+    ${CMAKE_CURRENT_SOURCE_DIR}/ui
+)
 
 target_link_libraries(hitek9081
   PRIVATE
