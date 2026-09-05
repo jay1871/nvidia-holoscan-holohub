@@ -34,7 +34,6 @@
 
 #include "holoscan/holoscan.hpp"
 #include <daqiri/daqiri.h>
-#include "kernels.cuh"
 #include "spectral_kernels.cuh"
 #include <dlpack/dlpack.h>
 #include <algorithm>
@@ -82,10 +81,12 @@ class Hitek9081RxOp : public Operator {
                       ttl_data_frames_, ttl_payload_bytes_,
                       ttl_packets_dropped_, ttl_metadata_pkts_,
                       ttl_psn_gaps_);
+#ifdef HITEK_ENABLE_RAW_DUMP
     for (int a = 0; a < MAX_ANTENNAS; a++) {
       if (raw_dump_file_[a]) fclose(raw_dump_file_[a]);
       if (raw_dump_pkt_file_[a]) fclose(raw_dump_pkt_file_[a]);
     }
+#endif
     drain_batch_queue();
     freeResources();
   }
@@ -117,7 +118,6 @@ class Hitek9081RxOp : public Operator {
     cudaEventCreate(&emit_event_);
 
     // Stream warmup — ensures CUDA context is active
-    dummy_packet_reorder(NULL, NULL, 1, 1, accum_stream_);
     cudaStreamSynchronize(accum_stream_);
 
     for (int b = 0; b < NUM_ACCUM_BUFS; b++) {
@@ -214,7 +214,9 @@ class Hitek9081RxOp : public Operator {
     const uint16_t hdr_size = header_size_.get();
     const int base_port = static_cast<int>(data_port_.get());
     const int batch_sz = batch_size_.get();
+#ifdef HITEK_ENABLE_RAW_DUMP
     const bool dumping = !dump_ready_ || (dump_ready_ && !dump_done_);
+#endif
 
     BurstParams* burst;
     const auto num_rx_queues = get_num_rx_queues(port_id_);
@@ -276,7 +278,9 @@ class Hitek9081RxOp : public Operator {
             continue;
           }
 
+#ifdef HITEK_ENABLE_RAW_DUMP
           if (dumping) dump_raw_samples(pkt_ptr, pkt_len, ant_id);
+#endif
 
           // Direct placement into per-antenna array for this concurrent batch
           h_ant_ptrs_[cur_batch_idx_][ant_id][batch_ant_pkt_count_[ant_id]++] = pkt_ptr + hdr_size;
@@ -547,6 +551,7 @@ class Hitek9081RxOp : public Operator {
     op_output.emit(out_msg, "iq_out");
   }
 
+#ifdef HITEK_ENABLE_RAW_DUMP
   void dump_raw_samples(const uint8_t* pkt_ptr, int pkt_len, int ant) {
     if (dump_done_) return;
     if (ant < 0 || ant >= cached_num_antennas_) return;
@@ -630,6 +635,7 @@ class Hitek9081RxOp : public Operator {
       }
     }
   }
+#endif
 
   void freeResources() {
     for (int n = 0; n < num_concurrent; n++) {
@@ -671,6 +677,7 @@ class Hitek9081RxOp : public Operator {
   int psn_log_count_ = 0;
   int64_t ttl_psn_gaps_ = 0;
   int64_t ttl_psn_gaps_ant_[MAX_ANTENNAS] = {};
+#ifdef HITEK_ENABLE_RAW_DUMP
   int raw_dump_samples_[MAX_ANTENNAS] = {};
   FILE* raw_dump_file_[MAX_ANTENNAS] = {};
   FILE* raw_dump_pkt_file_[MAX_ANTENNAS] = {};
@@ -680,6 +687,7 @@ class Hitek9081RxOp : public Operator {
   bool dump_done_ = false;
   bool dump_ant_seen_[MAX_ANTENNAS] = {};
   int dump_ant_seen_count_ = 0;
+#endif
   uint16_t nom_payload_size_;
   int payload_drop_log_count_ = 0;
   std::array<cudaEvent_t, num_concurrent> rx_events_{};
