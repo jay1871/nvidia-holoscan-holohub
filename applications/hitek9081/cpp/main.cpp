@@ -23,12 +23,10 @@
  * spectrum in real-time via Holoviz.
  *
  * Pipeline:
- *   Hitek9081RxOp ──→ SpectralOp ──→ HolovizOp
- *   (DPDK RX,       (window, FFT,    (line plot per antenna)
+ *   Hitek9081RxOp ──→ SpectralOp ──→ ImGuiDisplay / HolovizOp
+ *   (DPDK RX,       (window, FFT,    (spectrum & waterfall display)
  *    raw IQ out)     averaging,
- *        │           magnitude)
- *        │
- *        └──→ DDCOp (placeholder: narrowband extraction for ML)
+ *                    magnitude)
  *
  * CLI Usage:
  *   ./hitek9081 <config.yaml> --sr <MHz> --center-freq <MHz> [options]
@@ -79,7 +77,7 @@
 
 #include "hitek9081_rx_op.h"
 #include "spectral_op.h"
-#include "ddc_op.h"
+#include "ddc_manager.h"
 #ifdef HAS_IMGUI
 #include "imgui_display.h"
 #include "imgui_sink_op.h"
@@ -89,66 +87,15 @@
 #include <holoscan/operators/holoviz/holoviz.hpp>
 #include <daqiri/daqiri.h>
 
-#include <cuda.h>
+#include "app_config.h"
+#include "hsb_device_manager.h"
 #include <yaml-cpp/yaml.h>
-
-#include <hololink/core/data_channel.hpp>
-#include <hololink/core/enumerator.hpp>
-#include <hololink/core/hololink.hpp>
-#include <hololink/core/jesd.hpp>
-#include <hololink/core/htk_jesd.hpp>
-
-#include "amc_inference.h"
 #include <filesystem>
 #include <fstream>
 #include <getopt.h>
 #include <iostream>
-#include <sstream>
 #include <string>
 #include <csignal>
-
-#define CudaCheck(FUNC)                                                         \
-    {                                                                           \
-        const CUresult result = FUNC;                                           \
-        if (result != CUDA_SUCCESS) {                                           \
-            const char* error_name = "";                                        \
-            cuGetErrorName(result, &error_name);                                \
-            const char* error_string = "";                                      \
-            cuGetErrorString(result, &error_string);                            \
-            std::stringstream buf;                                              \
-            buf << "[" << __FILE__ << ":" << __LINE__ << "] CUDA driver error " \
-                << result << " (" << error_name << "): " << error_string;       \
-            throw std::runtime_error(buf.str().c_str());                        \
-        }                                                                       \
-    }
-
-struct AppConfig {
-  double sr_mhz = 0;
-  double center_freq_mhz = 0;
-  int fft_size = 65536;
-  int num_antennas = 1;
-  int num_averages = 1;
-  float db_min = -120.0f;
-  float db_max = 0.0f;
-  double freq_min_mhz = 0;
-  double freq_max_mhz = 0;
-  int iq_swap = 1;
-
-  int iq_format = 1;  // 0=pair-interleaved [I,Q,I,Q,...], 1=block-4 [IIII,QQQQ,...]
-  bool use_imgui = false;
-  bool waterfall = false;
-
-  // Computed from hsb config
-  uint16_t max_packet_size = 1482;
-  uint16_t header_size = 70;
-  int samples_per_antenna = 128;
-  uint32_t data_port = 4096;
-  int batch_size = 0;
-
-  // Integer-MHz frequency ticks for the display grid (computed once, capped at 11)
-  std::vector<double> tick_freqs_mhz;   // actual MHz values for labels
-  std::vector<float>  tick_x_norm;      // normalized [0,1] x-positions for grid lines
-};
 
 class App : public holoscan::Application {
  public:
@@ -210,9 +157,9 @@ class App : public holoscan::Application {
         Arg("output_mode", cfg_.use_imgui ? 1 : 0),
         Arg("freq_tick_positions", cfg_.tick_x_norm));
 
-    auto ddc = make_operator<ops::DDCOp>(
-        "ddc",
-        from_config("ddc"));
+    auto ddc_manager = std::make_shared<DDCManager>();
+    spectral->set_ddc_manager(ddc_manager);
+    spectral->set_sync_event(rx->emit_event());
 
     // =========================================================================
     // Display: ImGui or Holoviz
@@ -239,10 +186,9 @@ class App : public holoscan::Application {
           Arg("num_antennas", cfg_.num_antennas),
           Arg("num_bins", display_bins));
       imgui_sink->set_display(imgui_display_);
-      imgui_sink->set_ddc_channels(&spectral->ddc_channel(0), ops::SpectralOp::NUM_DDC_SLOTS);
+      imgui_sink->set_ddc_manager(ddc_manager);
       imgui_sink->set_signal_params(cfg_.sr_mhz, cfg_.center_freq_mhz, cfg_.fft_size);
 
-      spectral->set_rx_operator(rx.get());
       add_flow(rx, spectral, {{"iq_out", "iq_in"}});
       add_flow(spectral, imgui_sink, {{"out", "in"}});
     } else
@@ -277,7 +223,6 @@ class App : public holoscan::Application {
           Arg("width", static_cast<uint32_t>(1920)),
           Arg("height", static_cast<uint32_t>(1080)));
 
-      spectral->set_rx_operator(rx.get());
       add_flow(rx, spectral, {{"iq_out", "iq_in"}});
       add_flow(spectral, viz, {{"out", "receivers"}});
     }
@@ -349,6 +294,9 @@ void print_usage(const char* prog)
               << "  --freq-min MHz      Display minimum frequency (default: center - sr/2)\n"
               << "  --freq-max MHz      Display maximum frequency (default: center + sr/2)\n"
               << "  --hololink IP       HSB data-plane IP (default: from YAML)\n"
+              << "  --imgui             Use ImGui/ImPlot GUI (default when built with ImGui)\n"
+              << "  --holoviz           Use Holoviz renderer instead of ImGui\n"
+              << "  --waterfall         Enable waterfall spectrogram in ImGui\n"
               << "  -h, --help          Show this help\n";
 }
 
@@ -383,6 +331,8 @@ int main(int argc, char** argv) {
       {"freq-min", required_argument, nullptr, 0},
       {"freq-max", required_argument, nullptr, 0},
       {"imgui", no_argument, nullptr, 0},
+      {"no-imgui", no_argument, nullptr, 0},
+      {"holoviz", no_argument, nullptr, 0},
       {"waterfall", no_argument, nullptr, 0},
       {0, 0, nullptr, 0}};
 
@@ -414,6 +364,8 @@ int main(int argc, char** argv) {
         cfg.freq_max_mhz = std::stod(optarg);
       } else if (name == "imgui") {
         cfg.use_imgui = true;
+      } else if (name == "no-imgui" || name == "holoviz") {
+        cfg.use_imgui = false;
       } else if (name == "waterfall") {
         cfg.waterfall = true;
         cfg.use_imgui = true;
@@ -489,169 +441,37 @@ int main(int argc, char** argv) {
   }
 
   // -------------------------------------------------------------------------
-  // Load FPGA configuration from YAML
+  // Initialize HSB hardware & configure pipeline
   // -------------------------------------------------------------------------
   YAML::Node yaml = YAML::LoadFile(config_path.string());
-  const auto hsb_cfg = yaml["hsb"];
-  if (!hsb_cfg) {
-    HOLOSCAN_LOG_ERROR("Missing 'hsb' section in YAML config");
+  HsbDeviceManager hsb;
+  if (!hsb.initialize(yaml, hololink_ip_override, packets_per_frame_override, cfg)) {
     return 1;
   }
 
-  const std::string hololink_ip = hololink_ip_override.empty()
-      ? hsb_cfg["hololink_ip"].as<std::string>("192.168.0.2")
-      : hololink_ip_override;
-  const uint32_t mtu = hsb_cfg["mtu"].as<uint32_t>(1500);
-  const uint32_t data_port = hsb_cfg["data_port"].as<uint32_t>();
-  const uint32_t custom_header_size = hsb_cfg["custom_header_size"].as<uint32_t>(0);
-
-  // The FPGA RoCE packetizer operates in 128-byte pages and computes:
-  // payload_size = ((mtu - 74) / 128) * 128 (e.g. 3968 bytes for MTU 4096)
-  constexpr size_t HOLOLINK_PAGE_SIZE = 128;
-  constexpr uint32_t ROCE_OVERHEAD = 74;  // Eth(14)+IP(20)+UDP(8)+BTH(12)+RETH(16)+ICRC(4)
-  const size_t fpga_payload_size = ((mtu - ROCE_OVERHEAD) / HOLOLINK_PAGE_SIZE) * HOLOLINK_PAGE_SIZE;
-
-  size_t packet_payload_size = hsb_cfg["payload_size"].as<size_t>(fpga_payload_size);
-  if (packet_payload_size != fpga_payload_size) {
-    HOLOSCAN_LOG_WARN("YAML payload_size ({}) does not match FPGA packetizer size ({}) for MTU {}. Using {} to match FPGA.",
-                      packet_payload_size, fpga_payload_size, mtu, fpga_payload_size);
-    packet_payload_size = fpga_payload_size;
-  }
-
-  const uint32_t packets_per_frame = (packets_per_frame_override > 0)
-      ? packets_per_frame_override
-      : hsb_cfg["packets_per_frame"].as<uint32_t>(1000);
-  const size_t frame_size = packet_payload_size * packets_per_frame;
-
-  // Compute derived RX operator parameters from hsb config
-  constexpr uint32_t ROCE_HEADER_SIZE = 70;  // Eth(14)+IP(20)+UDP(8)+BTH(12)+RETH(16)
-  constexpr uint32_t ICRC_SIZE = 4;
-  const uint16_t max_packet_size = static_cast<uint16_t>(ROCE_HEADER_SIZE + packet_payload_size + ICRC_SIZE);
-  const uint16_t header_size = static_cast<uint16_t>(ROCE_HEADER_SIZE + custom_header_size);
-
-  cfg.num_antennas = yaml["hitek9081_rx"]["num_antennas"].as<int>(1);
-  cfg.iq_format = yaml["hitek9081_rx"]["iq_format"].as<int>(1);
-  cfg.max_packet_size = max_packet_size;
-  cfg.header_size = header_size;
-  cfg.data_port = data_port;
-  // Each channel arrives as separate packets on its own UDP port
-  cfg.samples_per_antenna = static_cast<int>((packet_payload_size - custom_header_size) / 4);
-  if (cfg.batch_size == 0) {
-    cfg.batch_size = yaml["hitek9081_rx"]["batch_size"].as<int>(20480);
-  }
-
-  HOLOSCAN_LOG_INFO("HSB config: pkt_payload={} frame_size={} ({} pkts/frame) mtu={} data_port={} num_antennas={} batch_size={}",
-                    packet_payload_size, frame_size, packets_per_frame, mtu, data_port, cfg.num_antennas, cfg.batch_size);
-  HOLOSCAN_LOG_INFO("Computed RX params: max_packet_size={} header_size={} samples_per_antenna={} nom_payload_size={}",
-                    cfg.max_packet_size, cfg.header_size, cfg.samples_per_antenna,
-                    cfg.max_packet_size - cfg.header_size);
-
-  cfg.iq_swap = yaml["spectral"]["iq_swap"].as<int>(1);
-  cfg.db_min = yaml["spectral"]["db_min"].as<float>(20.0f);
-  cfg.db_max = yaml["spectral"]["db_max"].as<float>(120.0f);
-
-  constexpr size_t HOLOLINK_METADATA_SIZE = 128;
-  const size_t metadata_address = ((frame_size + HOLOLINK_PAGE_SIZE - 1) / HOLOLINK_PAGE_SIZE) * HOLOLINK_PAGE_SIZE;
-  const size_t page_size = metadata_address + HOLOLINK_METADATA_SIZE;
-  const unsigned pages = 1;
-
-  double nyquist_mhz = cfg.sr_mhz / 2.0;
-  HOLOSCAN_LOG_INFO("Spectrum config: sr={:.3f} MHz, center={:.3f} MHz, Nyquist=±{:.3f} MHz, FFT={}, avg={}",
-                    cfg.sr_mhz, cfg.center_freq_mhz, nyquist_mhz, cfg.fft_size, cfg.num_averages);
-
   // -------------------------------------------------------------------------
-  // Phase 1: Hololink FPGA bringup
-  // -------------------------------------------------------------------------
-  HOLOSCAN_LOG_INFO("Initializing CUDA...");
-  CudaCheck(cuInit(0));
-  CUdevice cu_device;
-  CudaCheck(cuDeviceGet(&cu_device, 0));
-  CUcontext cu_context;
-  CudaCheck(cuDevicePrimaryCtxRetain(&cu_context, cu_device));
-
-  HOLOSCAN_LOG_INFO("Enumerating HSB at {} — {} ADC channel(s)...", hololink_ip, cfg.num_antennas);
-  std::vector<std::unique_ptr<hololink::DataChannel>> hololink_channels;
-  for (int i = 0; i < cfg.num_antennas; i++) {
-    hololink::Metadata meta = hololink::Enumerator::find_channel(hololink_ip);
-    if (i == 0) {
-      auto board_desc = meta.get<std::string>("board_description").value_or("unknown");
-      auto fpga_uuid = meta.get<std::string>("fpga_uuid").value_or("unknown");
-      HOLOSCAN_LOG_INFO("HSB Board: '{}' (FPGA UUID: {})", board_desc, fpga_uuid);
-    }
-    hololink::DataChannel::use_sensor(meta, i);
-    hololink::DataChannel::use_mtu(meta, mtu);
-    hololink_channels.push_back(std::make_unique<hololink::DataChannel>(meta));
-  }
-  std::shared_ptr<hololink::Hololink> hololink = hololink_channels[0]->hololink();
-
-  HOLOSCAN_LOG_INFO("Starting hololink control plane...");
-  hololink->start();
-  HOLOSCAN_LOG_INFO("Resetting hololink...");
-  hololink->reset();
-
-  // -------------------------------------------------------------------------
-  // Phase 1.5: Pre-build TensorRT engine (before DAQIRI starts)
-  // -------------------------------------------------------------------------
-  {
-    std::string amc_model = yaml["spectral"]["amc_model_path"].as<std::string>("");
-    if (!amc_model.empty()) {
-      std::string engine_path = amc_model.substr(0, amc_model.rfind('.')) + ".engine";
-      std::ifstream engine_check(engine_path);
-      if (!engine_check.good()) {
-        HOLOSCAN_LOG_INFO("======================================================");
-        HOLOSCAN_LOG_INFO("TensorRT engine not cached — building now...");
-        HOLOSCAN_LOG_INFO("This is a one-time operation (30-60 seconds on GB10).");
-        HOLOSCAN_LOG_INFO("The FPGA is NOT streaming yet — no packets will be lost.");
-        HOLOSCAN_LOG_INFO("======================================================");
-        AMCInference prebuild;
-        if (prebuild.initialize(amc_model, 4096)) {
-          HOLOSCAN_LOG_INFO("TensorRT engine cached: {}", engine_path);
-        } else {
-          HOLOSCAN_LOG_WARN("TensorRT engine build failed — AMC will be disabled");
-        }
-      }
-    }
-  }
-
-  // -------------------------------------------------------------------------
-  // Phase 2: DAQIRI init
+  // Initialize DAQIRI network engine
   // -------------------------------------------------------------------------
   if (daqiri::daqiri_init(config_path.string()) != daqiri::Status::SUCCESS) {
     HOLOSCAN_LOG_ERROR("Failed to initialize DAQIRI");
-    hololink->stop();
     return 1;
   }
   HOLOSCAN_LOG_INFO("DAQIRI initialized from {}", config_path.string());
 
   // -------------------------------------------------------------------------
-  // Phase 3: Program FPGA dataplane
+  // Start FPGA streaming
   // -------------------------------------------------------------------------
-  for (int i = 0; i < cfg.num_antennas; i++) {
-    hololink_channels[i]->authenticate(0, 0);
-    hololink_channels[i]->configure_roce(0, frame_size, page_size, pages, data_port + i);
-    HOLOSCAN_LOG_INFO("Channel {} configured: sensor={} udp_dst={}", i, i, data_port + i);
+  if (!hsb.start_streaming()) {
+    HOLOSCAN_LOG_ERROR("Failed to start FPGA streaming");
+    daqiri::shutdown();
+    return 1;
   }
-
-  std::shared_ptr<hololink::HTK_JESD_HPS_Config> mxfe_config_;
-  mxfe_config_ = std::make_shared<hololink::HTK_JESD_HPS_Config>(*hololink);
-  mxfe_config_->host_pause_mapping(1);
-  mxfe_config_->apply();
-
-
-  // MTU was injected into channel_metadata before DataChannel construction,
-  // so configure_roce() → configure_common() computes DP_PACKET_SIZE natively
-  // using our MTU value instead of the hardcoded DEFAULT_MTU (1500).
-  const uint32_t pkt_payload = std::min(mtu, static_cast<uint32_t>(packet_payload_size));
-  const uint32_t pkt_pages = (pkt_payload + 127) / 128;
-  HOLOSCAN_LOG_INFO("FPGA dataplane programmed: port={} frame_size={} ({} pkts/frame) page_size={} mtu={} pkt_pages={}",
-                    data_port, frame_size, packets_per_frame, page_size, mtu, pkt_pages);
 
   std::signal(SIGINT, signalHandler);
   std::signal(SIGTERM, signalHandler);
 
-
   // -------------------------------------------------------------------------
-  // Phase 4: Run Holoscan pipeline
+  // Run Holoscan pipeline
   // -------------------------------------------------------------------------
   auto app = holoscan::make_application<App>(cfg);
   app->config(config_path.string());
@@ -659,17 +479,13 @@ int main(int argc, char** argv) {
   app->run();
 
   // -------------------------------------------------------------------------
-  // Phase 5: Teardown
+  // Teardown
   // -------------------------------------------------------------------------
-  for (auto& ch : hololink_channels) ch->unconfigure();
+  hsb.stop_streaming();
 
   daqiri::print_stats();
   daqiri::shutdown();
   HOLOSCAN_LOG_INFO("DAQIRI shut down.");
 
-  hololink->stop();
-  HOLOSCAN_LOG_INFO("Hololink stopped.");
-
-  CudaCheck(cuDevicePrimaryCtxRelease(cu_device));
   return 0;
 }

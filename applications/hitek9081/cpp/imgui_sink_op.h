@@ -4,7 +4,7 @@
 
 #include "holoscan/holoscan.hpp"
 #include "imgui_display.h"
-#include "ddc_channel.h"
+#include "ddc_manager.h"
 #include <cuda_runtime.h>
 #include <vector>
 #include <memory>
@@ -12,19 +12,14 @@
 
 namespace holoscan::ops {
 
-class SpectralOp;
-
 class ImGuiSinkOp : public Operator {
  public:
   HOLOSCAN_OPERATOR_FORWARD_ARGS(ImGuiSinkOp)
   ImGuiSinkOp() = default;
 
-  // All three setters must be called before first compute(). Order doesn't matter.
+  // Setters must be called before first compute(). Order doesn't matter.
   void set_display(std::shared_ptr<ImGuiDisplay> display) { display_ = display; }
-  void set_ddc_channels(DDCChannel* channels, int count) {
-    ddc_channels_ = channels;
-    num_ddc_ = count;
-  }
+  void set_ddc_manager(std::shared_ptr<DDCManager> mgr) { ddc_manager_ = mgr; }
   void set_signal_params(double sample_rate_mhz, double center_freq_mhz, int fft_size) {
     sample_rate_mhz_ = sample_rate_mhz;
     center_freq_mhz_ = center_freq_mhz;
@@ -65,11 +60,11 @@ class ImGuiSinkOp : public Operator {
     }
 
     // Sync GUI DDC selections → DDC channel activation
-    if (ddc_channels_) {
-      for (int s = 0; s < num_ddc_; s++) {
+    if (ddc_manager_) {
+      for (int s = 0; s < DDCManager::NUM_SLOTS; s++) {
         const auto& slot = display_->get_ddc_slot(s);
 
-        if (slot.ddc_running && !ddc_channels_[s].is_active()) {
+        if (slot.ddc_running && !ddc_manager_->is_active(s)) {
           DDCChannel::Config ddc_cfg;
           ddc_cfg.center_freq_mhz = slot.center_mhz;
           ddc_cfg.lo_freq_mhz = center_freq_mhz_;
@@ -78,11 +73,11 @@ class ImGuiSinkOp : public Operator {
           ddc_cfg.input_length = fft_size_;
           ddc_cfg.output_length = 4096;
           ddc_cfg.antenna = slot.antenna;
-          ddc_channels_[s].activate(ddc_cfg);
+          ddc_manager_->activate_channel(s, ddc_cfg);
         // 0.001 MHz epsilon prevents float jitter from triggering DDC retune every frame
-        } else if (slot.ddc_running && ddc_channels_[s].is_active() &&
-                   (std::abs(ddc_channels_[s].bandwidth_mhz() - slot.ddc_bw_mhz) > 0.001 ||
-                    std::abs(ddc_channels_[s].center_freq_mhz() - slot.center_mhz) > 0.001)) {
+        } else if (slot.ddc_running && ddc_manager_->is_active(s) &&
+                   (std::abs(ddc_manager_->channel_bw_mhz(s) - slot.ddc_bw_mhz) > 0.001 ||
+                    std::abs(ddc_manager_->channel_center_mhz(s) - slot.center_mhz) > 0.001)) {
           DDCChannel::Config ddc_cfg;
           ddc_cfg.center_freq_mhz = slot.center_mhz;
           ddc_cfg.lo_freq_mhz = center_freq_mhz_;
@@ -91,15 +86,15 @@ class ImGuiSinkOp : public Operator {
           ddc_cfg.input_length = fft_size_;
           ddc_cfg.output_length = 4096;
           ddc_cfg.antenna = slot.antenna;
-          ddc_channels_[s].activate(ddc_cfg);
-        } else if (!slot.active && ddc_channels_[s].is_active()) {
+          ddc_manager_->activate_channel(s, ddc_cfg);
+        } else if (!slot.active && ddc_manager_->is_active(s)) {
           // Cleared — deactivate
-          ddc_channels_[s].deactivate();
+          ddc_manager_->deactivate_channel(s);
         }
 
         // Push classification results back to display
-        if (ddc_channels_[s].is_active()) {
-          const auto& result = ddc_channels_[s].classification();
+        if (ddc_manager_->is_active(s)) {
+          const auto result = ddc_manager_->get_classification(s);
           if (result.class_id >= 0) {
             display_->update_classification(s, result.class_id, result.confidence,
                                             result.top3_ids, result.top3_confidence,
@@ -114,8 +109,7 @@ class ImGuiSinkOp : public Operator {
 
  private:
   std::shared_ptr<ImGuiDisplay> display_;
-  DDCChannel* ddc_channels_ = nullptr;
-  int num_ddc_ = 0;
+  std::shared_ptr<DDCManager> ddc_manager_;
   double sample_rate_mhz_ = 0;
   double center_freq_mhz_ = 0;
   int fft_size_ = 0;

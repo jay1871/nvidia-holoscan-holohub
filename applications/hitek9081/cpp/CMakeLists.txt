@@ -40,7 +40,7 @@ FetchContent_Declare(hololink
   GIT_REPOSITORY https://github.com/nvidia-holoscan/holoscan-sensor-bridge.git
   GIT_TAG        fc2a6cfd7e85cd04d771fbf03ac45e3e7c57b5e1
   GIT_SHALLOW    FALSE
-  PATCH_COMMAND  /usr/bin/git checkout -- . && /usr/bin/git apply "${CMAKE_CURRENT_LIST_DIR}/htk_esom5u_core.patch"
+  PATCH_COMMAND  /usr/bin/git checkout -- . && /usr/bin/git clean -fd && /usr/bin/git apply "${CMAKE_CURRENT_LIST_DIR}/htk_esom5u_core.patch"
 )
 FetchContent_GetProperties(hololink)
 if(NOT hololink_POPULATED)
@@ -123,9 +123,9 @@ endif()
 # Application
 # ---------------------------------------------------------------------------
 add_executable(hitek9081
-  kernels.cu
   spectral_kernels.cu
   ddc_kernels.cu
+  hsb_device_manager.cpp
   main.cpp
   $<$<BOOL:${HITEK9081_IMGUI}>:imgui_display.cpp>
 )

@@ -32,14 +32,11 @@
 #include "spectral_pipeline.h"
 #include "spectral_kernels.cuh"
 #include "holoviz_output.h"
-#include "ddc_channel.h"
-#include "amc_inference.h"
+#include "ddc_manager.h"
 #include <dlpack/dlpack.h>
 #include <vector>
 #include <array>
 #include <string>
-
-#include "hitek9081_rx_op.h"
 
 namespace holoscan::ops {
 
@@ -113,11 +110,10 @@ class SpectralOp : public Operator {
       }
     }
 
-    // Initialize AMC inference if model path provided.
-    // Engine compilation blocks here if no cached .engine file exists.
-    if (!amc_model_path_.get().empty()) {
-      HOLOSCAN_LOG_INFO("Initializing AMC inference (may take 30-60s on first run)...");
-      if (amc_inference_.initialize(amc_model_path_.get(), 4096)) {
+    // Initialize AMC inference via DDCManager if model path provided
+    if (ddc_manager_ && !amc_model_path_.get().empty()) {
+      HOLOSCAN_LOG_INFO("Initializing AMC inference via DDCManager...");
+      if (ddc_manager_->initialize_amc(amc_model_path_.get(), 4096)) {
         HOLOSCAN_LOG_INFO("AMC inference engine ready: {}", amc_model_path_.get());
       } else {
         HOLOSCAN_LOG_WARN("AMC model failed to load: {} — classification disabled",
@@ -138,8 +134,8 @@ class SpectralOp : public Operator {
     if (maybe_input) {
       const auto& input = maybe_input.value();
       // RX operator emits async — GPU-side wait for copies to complete
-      if (rx_op_ && rx_op_->emit_event()) {
-        cudaStreamWaitEvent(pipeline_.stream(), rx_op_->emit_event(), 0);
+      if (sync_event_) {
+        cudaStreamWaitEvent(pipeline_.stream(), sync_event_, 0);
       }
       const int A = pipeline_.num_antennas();
       const int16_t* iq_ptrs[4] = {};
@@ -157,16 +153,8 @@ class SpectralOp : public Operator {
       if (has_new) has_result_ = true;
 
       // Process active DDC channels on raw IQ + run AMC classification
-      for (int s = 0; s < NUM_DDC_SLOTS; s++) {
-        if (ddc_channels_[s].is_active()) {
-          int ant = ddc_channels_[s].antenna();
-          if (ant < A && iq_ptrs[ant]) {
-            ddc_channels_[s].process(iq_ptrs[ant], pipeline_.stream());
-            if (amc_inference_.is_ready()) {
-              amc_inference_.infer(ddc_channels_[s]);
-            }
-          }
-        }
+      if (ddc_manager_) {
+        ddc_manager_->process(iq_ptrs, A, pipeline_.stream());
       }
     }
 
@@ -177,14 +165,8 @@ class SpectralOp : public Operator {
     }
   }
 
-  // DDC channel access — called from ImGui sink to activate/deactivate
-  static constexpr int NUM_DDC_SLOTS = 16;
-  DDCChannel& ddc_channel(int slot) { return ddc_channels_[slot]; }
-  const DDCChannel& ddc_channel(int slot) const { return ddc_channels_[slot]; }
-
-  void deactivate_ddc(int slot) { ddc_channels_[slot].deactivate(); }
-
-  void set_rx_operator(Hitek9081RxOp* rx) { rx_op_ = rx; }
+  void set_ddc_manager(std::shared_ptr<DDCManager> mgr) { ddc_manager_ = mgr; }
+  void set_sync_event(cudaEvent_t event) { sync_event_ = event; }
 
  public:
   static constexpr int MAX_DISPLAY_BINS = 2048;
@@ -232,11 +214,8 @@ class SpectralOp : public Operator {
   // DSP core (owns FFT, window, magnitude buffers)
   SpectralPipeline pipeline_;
 
-  // DDC channels (up to NUM_DDC_SLOTS simultaneous, user-assigned to any antenna)
-  std::array<DDCChannel, NUM_DDC_SLOTS> ddc_channels_;
-
-  // AMC modulation classifier
-  AMCInference amc_inference_;
+  // Shared DDC manager
+  std::shared_ptr<DDCManager> ddc_manager_;
 
   // Display adapters
   HolovizOutput holoviz_output_;
@@ -250,7 +229,7 @@ class SpectralOp : public Operator {
   int resolved_num_bins_ = 0;
 
   bool has_result_ = false;
-  Hitek9081RxOp* rx_op_ = nullptr;
+  cudaEvent_t sync_event_ = nullptr;
 
   // Parameters
   Parameter<int> fft_size_;
