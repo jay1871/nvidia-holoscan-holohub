@@ -2,7 +2,7 @@
 
 EfficientNet-B0 on 2D spectrograms using TorchSig's signal generation.
 
-Input: `[B, 1, 128, 64]` magnitude spectrogram. Output: `[B, 69]` class probabilities.
+Input: `[B, 1, 128, 64]` magnitude spectrogram (configurable via `--spec-time` and `--spec-freq`). Output: `[B, 69]` class probabilities.
 
 69 classes from TorchSig grouped into 11 families: OOK, ASK, FSK, PSK, QAM, OFDM, FM, AM, CHIRP, TONE, PROTOCOL.
 
@@ -79,6 +79,8 @@ python scripts/train_amc.py --resume models/amc_best.pt --epochs 0 \
 | `--batch-size` | 64 | Batch size (256 recommended for GPU) |
 | `--lr` | 1e-3 | AdamW + ReduceLROnPlateau (patience=15) |
 | `--input-length` | 4096 | IQ samples before STFT |
+| `--spec-time` | 128 | Spectrogram time bins |
+| `--spec-freq` | 64 | Spectrogram frequency bins |
 | `--backbone` | efficientnet\_b4 | timm model (`efficientnet_b0` strongly recommended) |
 | `--samples-per-class` | 2000 | Per class per epoch |
 | `--dynamic` | false | Fresh signals every batch |
@@ -162,6 +164,5 @@ IQ[4096] → STFT(Hanning, 128 time × 64 freq) → dB magnitude → normalize [
 Training: numpy (dynamic) or pre-computed `.npz` (static).
 Inference: CUDA `ddc_compute_spectrogram` kernel.
 
-Class list version-dependent — TorchSig v2.x has 69 classes. The C++ side
-([`cpp/dsp/amc_constants.h`](../cpp/dsp/amc_constants.h)) must match. If TorchSig version changes the class list,
-update `AMC_NUM_CLASSES` and `CLASS_NAMES` in [`cpp/dsp/amc_constants.h`](../cpp/dsp/amc_constants.h).
+- **Spectrogram Dimensions**: The C++ inference engine uses `SPEC_TIME = 128` and `SPEC_FREQ = 64` by default (defined in [`cpp/dsp/amc_inference.h`](../cpp/dsp/amc_inference.h)). If training with custom `--spec-time` or `--spec-freq`, update `SPEC_TIME` and `SPEC_FREQ` in `amc_inference.h` and the STFT kernel in [`cpp/dsp/ddc_kernels.cu`](../cpp/dsp/ddc_kernels.cu) to match the exported ONNX model input dimensions.
+- **Class list**: Version-dependent — TorchSig v2.x has 69 classes. The C++ side ([`cpp/dsp/amc_constants.h`](../cpp/dsp/amc_constants.h)) must match. If the TorchSig version changes the class list, update `AMC_NUM_CLASSES` and `CLASS_NAMES` in [`cpp/dsp/amc_constants.h`](../cpp/dsp/amc_constants.h).
