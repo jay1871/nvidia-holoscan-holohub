@@ -14,7 +14,7 @@
     },
     "platforms": ["x86_64", "aarch64"],
     "tags": ["Networking and Distributed Computing", "HSB", "UDP", "GPUDirect", "DPDK"],
-    "dockerfile": "pkg/holoscan-networking/Dockerfile",
+    "dockerfile": "applications/hitek9081/Dockerfile",
     "holoscan_sdk": {
       "minimum_required_version": "2.6.0",
       "tested_versions": [
@@ -37,8 +37,8 @@
       ]
     },
     "run": {
-      "command": "<holohub_app_bin>/hitek9081 hitek9081.yaml --hololink 192.168.0.2",
-      "workdir": "holohub_bin"
+      "command": "<holohub_app_bin>/hitek9081 hitek9081.yaml --sr 491.52 --center-freq 750 --hololink 192.168.0.2",
+      "workdir": "holohub_app_bin"
     }
   }
 }

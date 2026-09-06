@@ -322,13 +322,6 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/* \
     && ldconfig
 
-# TensorRT for AMC inference (ONNX → engine compilation + runtime)
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends \
-        libnvinfer-dev \
-        libnvinfer-plugin-dev \
-        libnvonnxparsers-dev \
-    && rm -rf /var/lib/apt/lists/*
 
 # DAQIRI's Python bindings use pybind11's CMake package. The package is
 # installed with pip above, so expose that package directory to CMake.

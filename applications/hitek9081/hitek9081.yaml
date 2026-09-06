@@ -154,4 +154,3 @@ spectral:
   # amc_model_path: ""  # Path to ONNX model (empty = classification disabled)
   db_min: -120.0
   db_max: -10.0
-

@@ -2,7 +2,7 @@
 
 Real-time wideband spectrum analysis with CUDA DDC and TensorRT modulation classification.
 
-```
+```text
 Hitek9081RxOp ──→ SpectralOp ──→ HolovizOp / ImGuiSinkOp
 (DPDK zero-copy     │ (FFT, avg,      (line plot / waterfall)
  scatter-gather)    │  magnitude)
@@ -14,32 +14,61 @@ Hitek9081RxOp ──→ SpectralOp ──→ HolovizOp / ImGuiSinkOp
 - DGX Spark (GB10, sm_121) or Hopper/Blackwell GPU with unified memory
 - HSB FPGA via ConnectX NIC, hugepages, NIC bound to DPDK
 - Isolated CPU cores: `isolcpus=16-19` in kernel cmdline
-- TensorRT dev libs in container (`libnvinfer-dev libnvinfer-plugin-dev libnvonnxparsers-dev`)
-- X11 display for ImGui or Holoviz
+- Display: X11 display (for live ImGui/Holoviz GUI) or built-in virtual framebuffer (`xvfb`) for headless operation
 
-## Build
+## Container Setup
 
-TensorRT dev libs are included in the networking container Dockerfile
-(`pkg/holoscan-networking/Dockerfile`).
+The application uses a layered container architecture to bundle TensorRT and X11/virtual display dependencies on top of the shared HoloHub networking image:
+
+1. **Base networking container** (`holohub:holoscan-networking`): Built from [`pkg/holoscan-networking/Dockerfile`](../../pkg/holoscan-networking/Dockerfile), providing Mellanox OFED/RDMA drivers, DPDK userspace drivers, and DAQIRI.
+2. **Application container** (`holohub-hitek9081:main`): Built from [`applications/hitek9081/Dockerfile`](Dockerfile), layering TensorRT libraries (`libnvinfer-dev`, `libnvinfer-plugin-dev`, `libnvonnxparsers-dev`), X11 utilities (`xauth`, `x11-utils`, `mesa-utils`), and virtual framebuffer (`xvfb`).
 
 ```bash
 cd ~/holohub
 
-# Step 1: Build container (includes TensorRT, DAQIRI, DPDK)
-./holohub build-container hitek9081 --language cpp
+# Step 1: Build base networking container (if not already built)
+./holohub build-container holoscan-networking
 
-# Step 2: Enter container
-./holohub run-container hitek9081 --language cpp \
-  --docker-opts="-u root --privileged -w /workspace/holohub/"
-
-# Step 3: Build application (inside container)
-./holohub build hitek9081 --language=cpp --parallel $(($(nproc)-1))
+# Step 2: Build hitek9081 application container
+./holohub build-container hitek9081
 ```
 
-If TensorRT is missing in an existing container (CMake error `NVINFER_LIB NOTFOUND`):
+## Quick Start (Build & Run in Container)
+
+All compilation and execution happens inside the container with root privileges (`--privileged` / `-u root`) to access ConnectX NIC hardware, hugepages, and real-time thread memory locking (`set_mempolicy`). HoloHub automatically forwards your host display socket so the GUI window renders directly on your desktop screen:
+
 ```bash
-apt-get update && apt-get install -y libnvinfer-dev libnvinfer-plugin-dev libnvonnxparsers-dev
+cd ~/holohub
+
+# 1. Enter the container environment
+./holohub run-container hitek9081 \
+  --docker-opts="-u root --privileged -w /workspace/holohub"
+
+# 2. Build the application (inside container)
+./holohub build hitek9081
+# Or directly using ninja:
+ninja -C build/hitek9081
+
+# 3. Run the application (inside container)
+./build/hitek9081/applications/hitek9081/cpp/hitek9081 \
+  applications/hitek9081/hitek9081.yaml \
+  --sr 491.52 --center-freq 750
 ```
+
+> [!TIP]
+> **Single-Command Host Execution**: For automated testing or scripts, you can build and run in one command from the host:
+>
+> ```bash
+> ./holohub run --as-root --docker-opts="--privileged" hitek9081
+> ```
+>
+> Pass custom parameters via `--run-args`:
+>
+> ```bash
+> ./holohub run --as-root --docker-opts="--privileged" \
+>   --run-args="--sr 491.52 --center-freq 750 --num-averages 4" \
+>   hitek9081
+> ```
 
 ## AMC Model
 
@@ -52,6 +81,7 @@ Training runs on any machine with CUDA — ONNX output is platform-independent.
 x86 is ~2× faster than ARM for training due to numpy/scipy throughput.
 
 **Train** (see [`scripts/README.md`](scripts/README.md)):
+
 ```bash
 python3 -m venv ~/amc_venv && source ~/amc_venv/bin/activate
 pip install torch timm onnx onnxscript numpy scipy matplotlib
@@ -63,6 +93,7 @@ python scripts/train_amc.py --epochs 250 --batch-size 256 \
 ```
 
 **Deploy:**
+
 ```bash
 # Copy model to DGX Spark
 scp models/amc_model.onnx nvidia@<dgx-ip>:~/holohub/applications/hitek9081/models/
@@ -71,6 +102,7 @@ rm models/amc_model.engine
 ```
 
 Set path in YAML:
+
 ```yaml
 spectral:
   amc_model_path: "/workspace/holohub/applications/hitek9081/models/amc_model.onnx"
@@ -83,7 +115,7 @@ First launch compiles TRT engine (30-60s, before DAQIRI — no packet loss).
 `hitek9081.yaml`:
 
 | Parameter | Description |
-|-----------|-------------|
+| ----------- | ------------- |
 | `hsb.hololink_ip` | FPGA data-plane IP |
 | `hsb.payload_size` | RoCE data packet payload (3968 B = 31 pages × 128 B, 992 IQ samples) |
 | `hsb.packets_per_frame` | Data packets per metadata packet (default: 1000, supports up to 100000:1) |
@@ -97,32 +129,46 @@ First launch compiles TRT engine (30-60s, before DAQIRI — no packet loss).
 | `spectral.amc_model_path` | ONNX path (empty = AMC disabled) |
 | `spectral.db_min/db_max` | Display dBFS range |
 
-## Run
+## Execution Options
+
+Run inside the container shell:
 
 ```bash
 ./build/hitek9081/applications/hitek9081/cpp/hitek9081 \
-  /workspace/holohub/applications/hitek9081/hitek9081.yaml \
+  applications/hitek9081/hitek9081.yaml \
   --sr <MHz> --center-freq <MHz> [options]
 ```
 
+### Headless Execution (Virtual Framebuffer)
+
+If running in a headless environment without an X11 server or physical display, use the container's built-in `xvfb-run` utility:
+
+```bash
+xvfb-run -a ./build/hitek9081/applications/hitek9081/cpp/hitek9081 \
+  applications/hitek9081/hitek9081.yaml \
+  --sr 491.52 --center-freq 750
+```
+
+### CLI Options
+
 | Flag | Description | Default |
-|------|-------------|---------|
-| `--sr MHz` | Sample rate (required) | — |
-| `--center-freq MHz` | Center frequency (required) | — |
-| `--fft-size N` | FFT size, power of 2 | 65536 |
-| `--num-averages N` | Linear power averaging | 1 |
+| ------ | ------------- | --------- |
+| `--sr MHz` | Sample rate in MHz (required) | — |
+| `--center-freq MHz` | Center frequency in MHz (required) | — |
+| `--fft-size N` | FFT size, power of 2 (512–1048576) | 65536 |
+| `--num-averages N` | Linear power averaging (1–32) | 1 |
 | `--batch-size N` | RX aggregation burst size | YAML (20480) |
-| `--packets-per-frame N` | Data packets per metadata packet | YAML (100000) |
+| `--packets-per-frame N` | Data packets per metadata packet | YAML (1000) |
 | `--freq-min/max MHz` | Display frequency range | full band |
-| `--hololink IP` | Override FPGA IP | YAML |
+| `--hololink IP` | Override FPGA IP | YAML (192.168.0.2) |
 | `--imgui` | ImGui display | Default |
 | `--holoviz` | Use Holoviz renderer instead of ImGui | — |
 | `--waterfall` | Scrolling spectrogram (implies `--imgui`) | line plot |
 
 ```bash
-# 4-Channel Mode @ 491.52 MSPS (ImGui default)
+# 4-Channel Mode @ 491.52 MSPS with 4x FFT averaging
 ./build/hitek9081/applications/hitek9081/cpp/hitek9081 \
-  /workspace/holohub/applications/hitek9081/hitek9081.yaml \
+  applications/hitek9081/hitek9081.yaml \
   --sr 491.52 --center-freq 750 --fft-size 65536 --num-averages 4
 ```
 
@@ -149,7 +195,8 @@ grouped by antenna — click row to expand zoomed FFT + classification.
 Click on zoomed FFT to recenter DDC.
 
 DDC signal path (all CUDA):
-```
+
+```text
 Raw int16 IQ → NCO mix (shift to DC) → FIR lowpass (shared memory, 63-tap Blackman)
   → decimate → tile to 4096 → STFT [128×64] spectrogram
   → TensorRT EfficientNet-B0 → 69-class softmax → family grouping
@@ -166,7 +213,7 @@ Classification: EMA (α=0.3) + 5% hysteresis. Per-slot state, reset on clear/ret
 
 ## Architecture
 
-```
+```text
 cpp/
 ├── main.cpp                     — CLI parsing, signal handling, and execution harness
 ├── app.h / app.cpp              — Holoscan application orchestration and pipeline composition
@@ -194,7 +241,8 @@ cpp/
 ## Zero-Copy RX
 
 DGX Spark CPU/GPU share LPDDR5. DAQIRI `host_pinned` buffers are GPU-accessible:
-```
+
+```text
 DAQIRI pool → pointer store → GPU scatter-gather → accum ring → emit
 ```
 
@@ -205,7 +253,7 @@ for multi-queue (see commented examples). RX operator iterates all queues
 automatically.
 
 | Queues | Cores | Throughput |
-|--------|-------|-----------|
+| -------- | ------- | ----------- |
 | 1 | 16 | ~47 Gbps |
 | 2 | 16-17 | ~94 Gbps |
 | 4 | 16-19 | ~100 Gbps |
