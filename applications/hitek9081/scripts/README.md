@@ -4,9 +4,9 @@ EfficientNet-B0 on 2D spectrograms using TorchSig's signal generation.
 
 Input: `[B, 1, 128, 64]` magnitude spectrogram (configurable via `--spec-time` and `--spec-freq`). Output: `[B, 69]` class probabilities.
 
-69 classes from TorchSig grouped into 11 families: OOK, ASK, FSK, PSK, QAM, OFDM, FM, AM, CHIRP, TONE, PROTOCOL.
+69 classes from TorchSig grouped into 14 families: OOK, ASK, FSK, PSK, QAM, OFDM, FM, AM, CHIRP, TONE, SPREAD, TDMA, SAT, BURST.
 
-Protocol signals: ADS-B, Bluetooth LE, GSM, DVB-S2, DMR, P25, LoRa, WiFi 802.11a, Zigbee.
+Protocol signals: SPREAD (LoRa, Zigbee), TDMA (GSM, DMR, P25), SAT (DVB-S2), BURST (ADS-B, Bluetooth LE), OFDM (WiFi 802.11a).
 
 ## Setup
 
@@ -115,9 +115,9 @@ B0 is strongly recommended. Family-level accuracy is equivalent across backbones
 | -------- | ------- |
 | Val accuracy (69 classes) | ~48-49% |
 | Macro F1 | ~0.44 |
-| Family accuracy (11 families) | ~80-85% |
+| Family accuracy (14 families) | ~80-85% |
 
-Strong families: PROTOCOL (lora 0.87, dvbs2 0.81, 80211a 0.75), FSK (16fsk 0.98), PSK (32psk 0.85), QAM (32qam\_cross 0.76).
+Strong families: SPREAD (lora 0.87), SAT (dvbs2 0.81), FSK (16fsk 0.98), PSK (32psk 0.85), QAM (32qam\_cross 0.76).
 
 Weak: OFDM subclass distinction (<0.15 per subclass, ~65% as family), low-order FSK variants (4fsk, 2gmsk).
 

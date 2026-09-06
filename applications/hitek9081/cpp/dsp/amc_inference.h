@@ -1,3 +1,20 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 #pragma once
 
 #include "ddc_channel.h"
@@ -34,10 +51,13 @@ class AMCInference {
 
   // Family mapping: class index → family ID.
   // Indices must match TorchSig signal_lists.py SIGNALS_SHARED_LIST order exactly.
-  enum Family { FAM_OOK=0, FAM_ASK, FAM_FSK, FAM_PSK, FAM_QAM, FAM_OFDM,
-                FAM_FM, FAM_AM, FAM_CHIRP, FAM_TONE, FAM_PROTOCOL, NUM_FAMILIES };
+  enum Family { FAM_OOK = 0, FAM_ASK, FAM_FSK, FAM_PSK, FAM_QAM, FAM_OFDM,
+                FAM_FM, FAM_AM, FAM_CHIRP, FAM_TONE,
+                FAM_SPREAD, FAM_TDMA, FAM_SAT, FAM_BURST, NUM_FAMILIES };
+  static_assert(NUM_FAMILIES == AMC_NUM_FAMILIES, "AMC_NUM_FAMILIES mismatch");
   static constexpr const char* FAMILY_NAMES[NUM_FAMILIES] = {
-    "OOK", "ASK", "FSK", "PSK", "QAM", "OFDM", "FM", "AM", "CHIRP", "TONE", "PROTOCOL"
+    "OOK", "ASK", "FSK", "PSK", "QAM", "OFDM", "FM", "AM", "CHIRP", "TONE",
+    "SPREAD", "TDMA", "SAT", "BURST"
   };
   static constexpr int CLASS_FAMILY[NUM_CLASSES] = {
     FAM_OOK,                                                          // ook
@@ -49,20 +69,20 @@ class AMCInference {
     FAM_PSK, FAM_PSK, FAM_PSK, FAM_PSK, FAM_PSK, FAM_PSK,          // bpsk-64psk
     FAM_QAM, FAM_QAM, FAM_QAM, FAM_QAM, FAM_QAM, FAM_QAM,        // 16qam-256qam
     FAM_QAM, FAM_QAM,                                                // 512qam_cross, 1024qam
-    FAM_PSK, FAM_PSK,                                                // 16apsk, 32apsk (amplitude-phase = PSK family)
+    FAM_PSK, FAM_PSK,                                                // 16apsk, 32apsk
     FAM_OFDM, FAM_OFDM, FAM_OFDM, FAM_OFDM, FAM_OFDM, FAM_OFDM,  // ofdm-64 to ofdm-300
     FAM_OFDM, FAM_OFDM, FAM_OFDM, FAM_OFDM, FAM_OFDM, FAM_OFDM,  // ofdm-512 to ofdm-2048
     FAM_FM,                                                           // fm
     FAM_AM, FAM_AM, FAM_AM, FAM_AM,                                  // am variants
     FAM_CHIRP, FAM_CHIRP, FAM_CHIRP,                                 // lfm-data, lfm-radar, chirpss
     FAM_TONE,                                                         // tone
-    FAM_PROTOCOL, FAM_PROTOCOL,                                       // adsb-long, adsb-short
-    FAM_PROTOCOL,                                                     // btle
-    FAM_PROTOCOL,                                                     // gsm
-    FAM_PROTOCOL,                                                     // dvbs2
-    FAM_PROTOCOL, FAM_PROTOCOL,                                       // dmr, p25
-    FAM_PROTOCOL,                                                     // lora
-    FAM_PROTOCOL, FAM_PROTOCOL,                                       // 80211a, zigbee
+    FAM_BURST, FAM_BURST,                                             // adsb-long, adsb-short
+    FAM_BURST,                                                        // btle
+    FAM_TDMA,                                                         // gsm
+    FAM_SAT,                                                          // dvbs2
+    FAM_TDMA, FAM_TDMA,                                               // dmr, p25
+    FAM_SPREAD,                                                       // lora
+    FAM_OFDM, FAM_SPREAD,                                             // 80211a, zigbee
   };
 
   AMCInference() = default;

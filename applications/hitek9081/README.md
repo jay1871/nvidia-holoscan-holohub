@@ -73,7 +73,7 @@ ninja -C build/hitek9081
 ## AMC Model
 
 EfficientNet-B0 on 2D spectrograms. 69 signal classes from TorchSig grouped
-into 11 families (OOK, ASK, FSK, PSK, QAM, OFDM, FM, AM, CHIRP, TONE, PROTOCOL).
+into 14 families (OOK, ASK, FSK, PSK, QAM, OFDM, FM, AM, CHIRP, TONE, SPREAD, TDMA, SAT, BURST).
 
 Protocol signals: ADS-B, Bluetooth LE, GSM, DVB-S2, DMR, P25, LoRa, WiFi 802.11a, Zigbee.
 
@@ -203,7 +203,7 @@ Raw int16 IQ → NCO mix (shift to DC) → FIR lowpass (shared memory, 63-tap Bl
 ```
 
 Display shows **signal family** as primary classification (sum of subclass probs).
-11 families: OOK, ASK, FSK, PSK, QAM, OFDM, FM, AM, CHIRP, TONE, PROTOCOL.
+14 families: OOK, ASK, FSK, PSK, QAM, OFDM, FM, AM, CHIRP, TONE, SPREAD, TDMA, SAT, BURST.
 
 Bandwidth presets: 1.4, 3, 5, 10, 15, 20, 40, 50, 60, 80, 100, 160 MHz.
 
