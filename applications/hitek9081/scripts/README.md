@@ -20,12 +20,18 @@ pip install git+https://github.com/TorchDSP/torchsig.git
 Training runs on any machine with CUDA. ONNX output is platform-independent.
 
 | Platform | ~Epoch time (B0, dynamic) |
-|----------|--------------------------|
+| ---------- | -------------------------- |
 | DGX Spark (20 ARM cores, GB10) | ~4-5 min |
 | x86 desktop (16-core, any GPU) | ~2-3 min |
 | x86 server (32-core, any GPU) | ~1-2 min |
 
 ## Training Modes
+
+Run training from the `applications/hitek9081` directory:
+
+```bash
+cd ~/holohub/applications/hitek9081
+```
 
 ### Dynamic (`--dynamic`) — recommended
 
@@ -39,7 +45,7 @@ python scripts/train_amc.py --epochs 250 --batch-size 256 \
 
 ### Static (default)
 
-Pre-computes spectrograms to `.npz`, trains with augmentation. Faster but overfits with B2/B4.
+Pre-computes spectrograms to `.npz` files under `--data-root` (`datasets/amc/`), then trains with data augmentation. Faster per epoch, but higher overfitting risk.
 
 ```bash
 python scripts/train_amc.py --epochs 250 --batch-size 256 \
@@ -68,16 +74,16 @@ python scripts/train_amc.py --resume models/amc_best.pt --epochs 0 \
 ## Parameters
 
 | Flag | Default | Description |
-|------|---------|-------------|
+| ------ | --------- | ------------- |
 | `--epochs` | 200 | Total epoch target |
-| `--batch-size` | 64 | Batch size (256 for GPU) |
+| `--batch-size` | 64 | Batch size (256 recommended for GPU) |
 | `--lr` | 1e-3 | AdamW + ReduceLROnPlateau (patience=15) |
 | `--input-length` | 4096 | IQ samples before STFT |
-| `--backbone` | efficientnet\_b4 | timm model (b0 recommended) |
+| `--backbone` | efficientnet\_b4 | timm model (`efficientnet_b0` strongly recommended) |
 | `--samples-per-class` | 2000 | Per class per epoch |
 | `--dynamic` | false | Fresh signals every batch |
-| `--data-root` | datasets/amc | Static mode: cached spectrograms |
-| `--regenerate` | false | Static mode: force regeneration |
+| `--data-root` | datasets/amc | Static mode: cached spectrograms directory |
+| `--regenerate` | false | Static mode: force regeneration of cached `.npz` |
 | `--checkpoint` | models/amc\_best.pt | Best weights save path |
 | `--resume` | — | Resume from checkpoint |
 | `--output` | models/amc\_model.onnx | ONNX export path |
@@ -85,12 +91,12 @@ python scripts/train_amc.py --resume models/amc_best.pt --epochs 0 \
 ## Backbone
 
 | Backbone | Params | Overfitting risk |
-|----------|--------|-----------------|
-| efficientnet\_b0 | ~5M | Low — recommended |
+| ---------- | -------- | ----------------- |
+| efficientnet\_b0 | ~5M | Low — recommended for live TRT inference |
 | efficientnet\_b2 | ~9M | Medium — dynamic only |
 | efficientnet\_b4 | ~19M | High — dynamic only |
 
-B0 recommended. Family-level accuracy is equivalent across backbones.
+B0 is strongly recommended. Family-level accuracy is equivalent across backbones while inference latency is significantly lower.
 
 ## Training details
 
@@ -104,7 +110,7 @@ B0 recommended. Family-level accuracy is equivalent across backbones.
 ## Expected performance (B0, 250 epochs, dynamic)
 
 | Metric | Value |
-|--------|-------|
+| -------- | ------- |
 | Val accuracy (69 classes) | ~48-49% |
 | Macro F1 | ~0.44 |
 | Family accuracy (11 families) | ~80-85% |
@@ -115,23 +121,41 @@ Weak: OFDM subclass distinction (<0.15 per subclass, ~65% as family), low-order 
 
 ## Output
 
-```
-models/amc_best.pt              # Best checkpoint
-models/amc_best_training.png    # Training curves
-models/amc_model.onnx           # ONNX for TensorRT
+```text
+models/amc_best.pt              # Best checkpoint weights
+models/amc_best_training.png    # Training curves (Loss, Acc, F1, LR)
+models/amc_model.onnx           # ONNX model ready for TensorRT
+datasets/amc/*.npz              # Cached datasets (static mode only)
 ```
 
 ## Deploy
 
-1. Copy `models/amc_model.onnx` to DGX Spark
-2. YAML: `spectral.amc_model_path: "/workspace/holohub/applications/hitek9081/models/amc_model.onnx"`
-3. Delete stale engine: `rm models/amc_model.engine`
-4. First launch builds TRT engine (30-60s, before DAQIRI)
+1. Copy `models/amc_model.onnx` to DGX Spark:
+
+   ```bash
+   scp models/amc_model.onnx nvidia@<dgx-ip>:~/holohub/applications/hitek9081/models/
+   ```
+
+2. Set path in YAML (`hitek9081.yaml`):
+
+   ```yaml
+   spectral:
+     amc_model_path: "/workspace/holohub/applications/hitek9081/models/amc_model.onnx"
+   ```
+
+3. Delete stale engine if updating an existing model:
+
+   ```bash
+   rm -f models/amc_model.engine
+   ```
+
+4. First launch compiles the TRT engine (30–60s on GB10, cached as `.engine` for subsequent runs).
 
 ## Data pipeline match
 
 Training and C++ inference both compute:
-```
+
+```text
 IQ[4096] → STFT(Hanning, 128 time × 64 freq) → dB magnitude → normalize [0,1]
 ```
 
@@ -139,5 +163,5 @@ Training: numpy (dynamic) or pre-computed `.npz` (static).
 Inference: CUDA `ddc_compute_spectrogram` kernel.
 
 Class list version-dependent — TorchSig v2.x has 69 classes. The C++ side
-(`amc_constants.h`) must match. If TorchSig version changes the class list,
-update `AMC_NUM_CLASSES` and `CLASS_NAMES` in `amc_inference.h`.
+([`cpp/dsp/amc_constants.h`](../cpp/dsp/amc_constants.h)) must match. If TorchSig version changes the class list,
+update `AMC_NUM_CLASSES` and `CLASS_NAMES` in [`cpp/dsp/amc_constants.h`](../cpp/dsp/amc_constants.h).
