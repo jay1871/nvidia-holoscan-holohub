@@ -53,18 +53,18 @@ void power_to_db(const float* accum, float* out, int n, int num_averages,
 void dc_mean_int16(const int16_t* in, float* mean_iq, int num_samples,
                    int iq_swap, cudaStream_t stream);
 
-// Window + DC mean subtraction + int16→float2 conversion in one pass.
+// Window + DC mean subtraction + int16->float2 conversion in one pass.
 // Subtracts mean_iq from each sample before windowing.
 void apply_window_dcblock_int16_to_float2(const int16_t* in, const float* window,
                                           const float* mean_iq, float2* out,
                                           int num_samples, int iq_swap,
                                           cudaStream_t stream);
 
-// Window + int16→float2 (no DC subtraction).
+// Window + int16->float2 (no DC subtraction).
 void apply_window_int16_to_float2(const int16_t* in, const float* window, float2* out,
                                   int num_samples, int iq_swap, cudaStream_t stream);
 
-// Accumulate |FFT[bin]|² from float2 FFT output into fp32 power buffer (fftshifted).
+// Accumulate |FFT[bin]|^2 from float2 FFT output into fp32 power buffer (fftshifted).
 // in:    float2[n] (FFT output, natural order)
 // accum: float[n] (running sum, fftshifted indexing)
 void accumulate_power_fftshift_f32(const float2* in, float* accum, int n,

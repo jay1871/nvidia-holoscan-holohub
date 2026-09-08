@@ -16,11 +16,11 @@
  */
 
 /*
- * SpectralOp — Holoscan operator wrapping the SpectralPipeline DSP core
+ * SpectralOp -- Holoscan operator wrapping the SpectralPipeline DSP core
  *
  * Thin operator that:
  *   1. Receives int16 IQ TensorMap from Hitek9081RxOp
- *   2. Feeds it to SpectralPipeline (window → FFT → magnitude)
+ *   2. Feeds it to SpectralPipeline (window -> FFT -> magnitude)
  *   3. Emits display-ready output via the appropriate adapter:
  *      - output_mode=0: Holoviz normalized coords + grid overlays
  *      - output_mode=1: GPU-downsampled raw dB floats for ImGui

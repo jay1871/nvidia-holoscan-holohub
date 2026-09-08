@@ -38,17 +38,8 @@ void ddc_tile_to_length(const float2* src, float2* dst, int src_len, int dst_len
 // scratch: pre-allocated float[1] on GPU for power reduction (avoids per-call cudaMalloc).
 void ddc_normalize_power(float2* data, int n, float* scratch, cudaStream_t stream);
 
-// Deinterleave float2 → separate I/Q channels for TensorRT: [I0,I1,...,Q0,Q1,...]
+// Deinterleave float2 -> separate I/Q channels for TensorRT: [I0,I1,...,Q0,Q1,...]
 void ddc_deinterleave_iq(const float2* src, float* dst, int n, cudaStream_t stream);
-
-// Compute magnitude spectrogram from complex IQ for 2D CNN input.
-// in:       float2[n_iq] complex IQ samples
-// out:      float[spec_time * spec_freq] normalized magnitude spectrogram
-// window:   float[win_len] pre-computed Hanning window (win_len = spec_freq * 2)
-void ddc_compute_spectrogram(const float2* in, float* out, int n_iq,
-                             const float* window, int win_len,
-                             int spec_time, int spec_freq,
-                             cudaStream_t stream);
 
 // Generate lowpass FIR taps (windowed sinc) on GPU.
 // cutoff_normalized: cutoff_freq / sample_rate (0 to 0.5)

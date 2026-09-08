@@ -1,11 +1,11 @@
-// Windowed FFT → magnitude pipeline. No display dependencies.
+// Windowed FFT -> magnitude pipeline. No display dependencies.
 // Operates entirely on GPU via a dedicated CUDA stream.
 //
 // Pipeline per frame:
-//   int16 IQ → Hanning window → cuFFT (fp32 batched) → |X|² accumulation or dB conversion
+//   int16 IQ -> Hanning window -> cuFFT (fp32 batched) -> |X|^2 accumulation or dB conversion
 //
-// Averaging accumulates |FFT[k]|² in linear power domain (not dB) to preserve
-// noise statistics. After num_averages frames: 10*log10(accum/N) → dBFS.
+// Averaging accumulates |FFT[k]|^2 in linear power domain (not dB) to preserve
+// noise statistics. After num_averages frames: 10*log10(accum/N) -> dBFS.
 #pragma once
 
 #include "spectral_kernels.cuh"
@@ -80,7 +80,7 @@ class SpectralPipeline {
     for (int a = 0; a < A_; a++) {
       float2* fft_a = fft_out_d_ + a * N_;
       if (num_avg > 1) {
-        // Accumulate |FFT[k]|² — linear power preserves noise statistics for averaging
+        // Accumulate |FFT[k]|^2 -- linear power preserves noise statistics for averaging
         accumulate_power_fftshift_f32(fft_a, power_accum_d_[a], N_, 0, stream_);
       } else {
         magnitude_db_fftshift_f32(fft_a, mag_d_[a], N_, 0, adc_fullscale_, stream_);
@@ -134,7 +134,7 @@ class SpectralPipeline {
   float* window_d_ = nullptr;
   float2* fft_in_d_ = nullptr;
   float2* fft_out_d_ = nullptr;         // natural order (bin 0 = DC)
-  std::vector<float*> power_accum_d_;   // linear |X|² accumulator per antenna
+  std::vector<float*> power_accum_d_;   // linear |X|^2 accumulator per antenna
   std::vector<float*> mag_d_;           // fftshifted dBFS output per antenna
 
   int avg_count_ = 0;

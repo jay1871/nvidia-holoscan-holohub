@@ -49,7 +49,7 @@ class AMCInference {
     "80211a", "zigbee",
   };
 
-  // Family mapping: class index → family ID.
+  // Family mapping: class index -> family ID.
   // Indices must match TorchSig signal_lists.py SIGNALS_SHARED_LIST order exactly.
   enum Family { FAM_OOK = 0, FAM_ASK, FAM_FSK, FAM_PSK, FAM_QAM, FAM_OFDM,
                 FAM_FM, FAM_AM, FAM_CHIRP, FAM_TONE,
@@ -88,10 +88,6 @@ class AMCInference {
   AMCInference() = default;
   ~AMCInference() { destroy(); }
 
-  // STFT dimensions — must match train_amc.py iq_to_spectrogram() parameters
-  static constexpr int SPEC_TIME = 128;
-  static constexpr int SPEC_FREQ = 64;
-
   // First call builds TRT engine from ONNX (30-60s on GB10), caches as .engine.
   // Subsequent calls load cached engine instantly. Delete .engine to force rebuild.
   bool initialize(const std::string& onnx_path, int input_length = 4096) {
@@ -103,7 +99,7 @@ class AMCInference {
       return create_context();
     }
 
-    fprintf(stderr, "[AMC] Building TensorRT engine from %s — this takes 30-60 seconds...\n",
+    fprintf(stderr, "[AMC] Building TensorRT engine from %s -- this takes 30-60 seconds...\n",
             onnx_path.c_str());
     fflush(stderr);
     if (!build_engine(onnx_path)) return false;
@@ -115,13 +111,18 @@ class AMCInference {
   void infer(DDCChannel& channel) {
     if (!context_ || !channel.is_active()) return;
 
-    // Convert IQ to spectrogram [1, 1, 128, 64] for 2D CNN
-    ddc_compute_spectrogram(channel.iq_output_gpu(), input_d_, input_length_,
-                            stft_window_d_, SPEC_FREQ * 2,
-                            SPEC_TIME, SPEC_FREQ, channel.stream());
+    // Deinterleave float2 [I0, Q0, I1, Q1, ...] -> planar [2, N] (row 0: I, row 1: Q)
+    ddc_deinterleave_iq(channel.iq_output_gpu(), input_d_, input_length_, channel.stream());
 
-    context_->setTensorAddress("spectrogram", input_d_);
-    context_->setTensorAddress("class_probs", output_d_);
+    nvinfer1::Dims shape;
+    shape.nbDims = 3;
+    shape.d[0] = 1;
+    shape.d[1] = 2;
+    shape.d[2] = input_length_;
+    context_->setInputShape(input_tensor_name_.c_str(), shape);
+
+    context_->setTensorAddress(input_tensor_name_.c_str(), input_d_);
+    context_->setTensorAddress(output_tensor_name_.c_str(), output_d_);
     context_->enqueueV3(channel.stream());
 
     cudaMemcpyAsync(output_h_, output_d_, NUM_CLASSES * sizeof(float),
@@ -213,8 +214,6 @@ class AMCInference {
     auto profile = builder->createOptimizationProfile();
     auto input = network->getInput(0);
     auto dims = input->getDimensions();
-    // min=1, opt=1, max=1 (single inference, no batching needed)
-    nvinfer1::Dims4 shape(1, dims.d[1], dims.d[2], 1);
     nvinfer1::Dims inputDims;
     inputDims.nbDims = dims.nbDims;
     for (int i = 0; i < dims.nbDims; i++) inputDims.d[i] = (dims.d[i] == -1) ? 1 : dims.d[i];
@@ -238,19 +237,32 @@ class AMCInference {
     context_.reset(engine_->createExecutionContext());
     if (!context_) return false;
 
-    // Spectrogram input buffer [SPEC_TIME * SPEC_FREQ]
-    if (cudaMalloc(&input_d_, SPEC_TIME * SPEC_FREQ * sizeof(float)) != cudaSuccess) return false;
-    if (cudaMalloc(&output_d_, NUM_CLASSES * sizeof(float)) != cudaSuccess) return false;
-
-    // STFT Hanning window (win_len = SPEC_FREQ * 2)
-    int win_len = SPEC_FREQ * 2;
-    if (cudaMalloc(&stft_window_d_, win_len * sizeof(float)) != cudaSuccess) return false;
-    // Generate Hanning window on GPU
-    std::vector<float> win(win_len);
-    for (int i = 0; i < win_len; i++) {
-      win[i] = 0.5f * (1.0f - cosf(2.0f * 3.14159265f * i / win_len));
+    // Detect IO tensor names and dimensions from engine
+    input_tensor_name_ = "iq";
+    output_tensor_name_ = "class_probs";
+    for (int i = 0; i < engine_->getNbIOTensors(); i++) {
+      const char* name = engine_->getIOTensorName(i);
+      nvinfer1::TensorIOMode mode = engine_->getTensorIOMode(name);
+      nvinfer1::Dims dims = engine_->getTensorShape(name);
+      if (mode == nvinfer1::TensorIOMode::kINPUT) {
+        input_tensor_name_ = name;
+        input_dims_ = dims;
+      } else if (mode == nvinfer1::TensorIOMode::kOUTPUT) {
+        output_tensor_name_ = name;
+        output_dims_ = dims;
+      }
     }
-    cudaMemcpy(stft_window_d_, win.data(), win_len * sizeof(float), cudaMemcpyHostToDevice);
+
+    int num_iq_samples = (input_dims_.nbDims == 3 && input_dims_.d[2] > 0)
+                             ? input_dims_.d[2]
+                             : input_length_;
+    input_length_ = num_iq_samples;
+    size_t input_bytes = 2 * input_length_ * sizeof(float);
+    if (cudaMalloc(&input_d_, input_bytes) != cudaSuccess) return false;
+    fprintf(stderr, "[AMC] Initialized Raw-IQ inference: input '%s' [1, 2, %d] (%.1f KB)\n",
+            input_tensor_name_.c_str(), input_length_, input_bytes / 1024.0f);
+
+    if (cudaMalloc(&output_d_, NUM_CLASSES * sizeof(float)) != cudaSuccess) return false;
 
     return true;
   }
@@ -295,7 +307,6 @@ class AMCInference {
     engine_.reset();
     if (input_d_) { cudaFree(input_d_); input_d_ = nullptr; }
     if (output_d_) { cudaFree(output_d_); output_d_ = nullptr; }
-    if (stft_window_d_) { cudaFree(stft_window_d_); stft_window_d_ = nullptr; }
   }
 
   class Logger : public nvinfer1::ILogger {
@@ -308,10 +319,15 @@ class AMCInference {
 
   Logger logger_;
   int input_length_ = 4096;
+  std::string input_tensor_name_ = "iq";
+  std::string output_tensor_name_ = "class_probs";
+  nvinfer1::Dims input_dims_{};
+  nvinfer1::Dims output_dims_{};
+
   std::unique_ptr<nvinfer1::ICudaEngine> engine_;
   std::unique_ptr<nvinfer1::IExecutionContext> context_;
-  // EMA smoothing: 30% new frame + 70% history. Lower α = more stable, slower response.
-  // Tuned for ~7 Hz FFT frame rate — 0.3 gives ~1s settling time.
+  // EMA smoothing: 30% new frame + 70% history. Lower alpha = more stable, slower response.
+  // Tuned for ~7 Hz FFT frame rate -- 0.3 gives ~1s settling time.
   static constexpr float EMA_ALPHA = 0.3f;
   // Hysteresis: displayed class only changes if new winner exceeds current by this margin.
   // Prevents flickering on TDD signals where class confidence oscillates.
@@ -319,6 +335,5 @@ class AMCInference {
 
   float* input_d_ = nullptr;
   float* output_d_ = nullptr;
-  float* stft_window_d_ = nullptr;
   float output_h_[NUM_CLASSES] = {};
 };

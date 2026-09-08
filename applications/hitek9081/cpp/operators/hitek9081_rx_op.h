@@ -16,7 +16,7 @@
  */
 
 /*
- * Hitek9081RxOp — DPDK packet reception with zero-copy scatter-gather
+ * Hitek9081RxOp -- DPDK packet reception with zero-copy scatter-gather
  *
  * Receives RoCE-framed UDP packets from the HSB FPGA via DAQIRI DPDK,
  * filters metadata packets, accumulates IQ samples per antenna into
@@ -24,7 +24,7 @@
  *
  * Zero-copy path: on DGX Spark (unified LPDDR5), DAQIRI's host_pinned
  * buffers are GPU-accessible. We store payload pointers and pass them
- * directly to a GPU scatter-gather kernel — no memcpy, no cudaMemcpyAsync.
+ * directly to a GPU scatter-gather kernel -- no memcpy, no cudaMemcpyAsync.
  *
  * Output: TensorMap with one [fft_size, 2] int16 tensor per antenna
  *         (raw I,Q pairs on GPU). Emitted at most once per compute() call.
@@ -95,7 +95,7 @@ class Hitek9081RxOp : public Operator {
   int64_t ttl_packets_dropped_ = 0;
   int64_t ttl_metadata_pkts_ = 0;
 
-  // Cached Parameter values — set once in initialize(), used in hot path
+  // Cached Parameter values -- set once in initialize(), used in hot path
   int cached_fft_size_ = 0;
   int cached_num_antennas_ = 0;
   int cached_samples_per_ant_ = 0;
@@ -126,7 +126,7 @@ class Hitek9081RxOp : public Operator {
   std::array<std::array<void**, MAX_ANTENNAS>, num_concurrent> h_ant_ptrs_{};
   std::array<int, MAX_ANTENNAS> batch_ant_pkt_count_{};
 
-  // IQ accumulation — per-antenna offsets
+  // IQ accumulation -- per-antenna offsets
   cudaStream_t accum_stream_ = nullptr;
   cudaEvent_t emit_event_ = nullptr;
   std::vector<void*> accum_bufs_[NUM_ACCUM_BUFS];

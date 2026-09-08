@@ -47,7 +47,7 @@ namespace holoscan::ops {
 // RoCE v2 BTH offsets from buffer start (IBTA spec): Eth(14) + IP(20) + UDP(8) = 42
 static constexpr int BTH_OPCODE_OFFSET = 42;
 static constexpr int BTH_PSN_OFFSET = 50;             // BTH byte 8: 24-bit Packet Sequence Number
-static constexpr uint8_t ROCE_WRITE_ONLY_IMM = 0x2B;  // metadata packet — skip
+static constexpr uint8_t ROCE_WRITE_ONLY_IMM = 0x2B;  // metadata packet -- skip
 static constexpr int UDP_DST_OFFSET = 36;             // Eth(14) + IP(20) + UDP_src(2)
 
 Hitek9081RxOp::~Hitek9081RxOp() {
@@ -157,7 +157,7 @@ void Hitek9081RxOp::initialize() {
   ttl_psn_gaps_ = 0;
   last_report_psn_gaps_ = 0;
 
-  HOLOSCAN_LOG_INFO("Hitek9081RxOp::initialize() — payload={} batch={} fft={} antennas={} bufs={}",
+  HOLOSCAN_LOG_INFO("Hitek9081RxOp::initialize() -- payload={} batch={} fft={} antennas={} bufs={}",
                     nom_payload_size_, cached_batch_size_, N, A, NUM_ACCUM_BUFS);
 }
 
@@ -372,7 +372,7 @@ void Hitek9081RxOp::drain_batch_queue() {
 void Hitek9081RxOp::process_batch() {
   free_processed_packets();
   if (batch_q_.size() == static_cast<size_t>(num_concurrent)) {
-    HOLOSCAN_LOG_ERROR("Fell behind — dropping batch!");
+    HOLOSCAN_LOG_ERROR("Fell behind -- dropping batch!");
     for (int m = 0; m < cur_batch_.num_bursts; m++) {
       ttl_packets_dropped_ += get_num_packets(cur_batch_.bursts[m]);
       free_all_packets_and_burst_rx(cur_batch_.bursts[m]);
@@ -524,7 +524,7 @@ void Hitek9081RxOp::dump_raw_samples(const uint8_t* pkt_ptr, int pkt_len, int an
   if (!dump_ready_) {
     if (std::chrono::steady_clock::now() - dump_start_ < std::chrono::seconds(5)) return;
     dump_ready_ = true;
-    HOLOSCAN_LOG_INFO("=== Dump delay elapsed — capturing steady-state data ===");
+    HOLOSCAN_LOG_INFO("=== Dump delay elapsed -- capturing steady-state data ===");
   }
 
   int num_samp = cached_samples_per_ant_;

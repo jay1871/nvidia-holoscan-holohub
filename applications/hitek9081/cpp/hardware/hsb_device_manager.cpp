@@ -117,7 +117,7 @@ bool HsbDeviceManager::initialize(const YAML::Node& yaml,
   pages_ = 1;
 
   double nyquist_mhz = cfg.sr_mhz / 2.0;
-  HOLOSCAN_LOG_INFO("Spectrum config: sr={:.3f} MHz, center={:.3f} MHz, Nyquist=±{:.3f} MHz, FFT={}, avg={}",
+  HOLOSCAN_LOG_INFO("Spectrum config: sr={:.3f} MHz, center={:.3f} MHz, Nyquist=+/-{:.3f} MHz, FFT={}, avg={}",
                     cfg.sr_mhz, cfg.center_freq_mhz, nyquist_mhz, cfg.fft_size, cfg.num_averages);
 
   // Initialize CUDA context
@@ -128,7 +128,7 @@ bool HsbDeviceManager::initialize(const YAML::Node& yaml,
   cuda_initialized_ = true;
 
   // Enumerate HSB
-  HOLOSCAN_LOG_INFO("Enumerating HSB at {} — {} ADC channel(s)...", hololink_ip_, cfg.num_antennas);
+  HOLOSCAN_LOG_INFO("Enumerating HSB at {} -- {} ADC channel(s)...", hololink_ip_, cfg.num_antennas);
   hololink_channels_.clear();
   for (int i = 0; i < cfg.num_antennas; i++) {
     hololink::Metadata meta = hololink::Enumerator::find_channel(hololink_ip_);
@@ -155,15 +155,15 @@ bool HsbDeviceManager::initialize(const YAML::Node& yaml,
     std::ifstream engine_check(engine_path);
     if (!engine_check.good()) {
       HOLOSCAN_LOG_INFO("======================================================");
-      HOLOSCAN_LOG_INFO("TensorRT engine not cached — building now...");
+      HOLOSCAN_LOG_INFO("TensorRT engine not cached -- building now...");
       HOLOSCAN_LOG_INFO("This is a one-time operation (30-60 seconds on GB10).");
-      HOLOSCAN_LOG_INFO("The FPGA is NOT streaming yet — no packets will be lost.");
+      HOLOSCAN_LOG_INFO("The FPGA is NOT streaming yet -- no packets will be lost.");
       HOLOSCAN_LOG_INFO("======================================================");
       AMCInference prebuild;
       if (prebuild.initialize(amc_model, 4096)) {
         HOLOSCAN_LOG_INFO("TensorRT engine cached: {}", engine_path);
       } else {
-        HOLOSCAN_LOG_WARN("TensorRT engine build failed — AMC will be disabled");
+        HOLOSCAN_LOG_WARN("TensorRT engine build failed -- AMC will be disabled");
       }
     }
   }

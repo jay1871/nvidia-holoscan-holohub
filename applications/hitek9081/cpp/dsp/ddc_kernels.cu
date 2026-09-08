@@ -10,8 +10,8 @@
 #include <algorithm>
 
 // =============================================================================
-// NCO downconversion: multiply by e^{-j2πf_norm·n} to shift target to DC.
-// Negative sign = downconversion convention (positive freq → baseband).
+// NCO downconversion: multiply by exp(-j * 2 * pi * f_norm * n) to shift target to DC.
+// Negative sign = downconversion convention (positive freq -> baseband).
 // Phase accumulates across frames to maintain continuity.
 // =============================================================================
 
@@ -43,7 +43,7 @@ void ddc_nco_mix(const int16_t* in, float2* out, int n,
 
 // =============================================================================
 // FIR lowpass filter (complex signal, real taps).
-// Uses shared memory tile with halo for input overlap — reduces global reads ~30x.
+// Uses shared memory tile with halo for input overlap -- reduces global reads ~30x.
 // Taps loaded into shared memory once per block (63 floats = 252 bytes).
 // Boundary: truncation at edges (not circular). Acceptable for long signals.
 // =============================================================================
@@ -169,7 +169,7 @@ void ddc_normalize_power(float2* data, int n, float* scratch, cudaStream_t strea
   int blocks = (n + threads - 1) / threads;
   compute_power_kernel<<<blocks, threads, 0, stream>>>(data, scratch, n);
 
-  // CPU round-trip to read scalar power — unavoidable without a two-kernel device-side approach.
+  // CPU round-trip to read scalar power -- unavoidable without a two-kernel device-side approach.
   // Acceptable at ~7 Hz DDC frame rate; total stall <0.1ms per channel.
   float total_power;
   cudaMemcpyAsync(&total_power, scratch, sizeof(float), cudaMemcpyDeviceToHost, stream);
@@ -183,7 +183,7 @@ void ddc_normalize_power(float2* data, int n, float* scratch, cudaStream_t strea
 }
 
 // =============================================================================
-// Deinterleave float2 → [I,I,...,Q,Q,...] for TensorRT
+// Deinterleave float2 -> [I,I,...,Q,Q,...] for TensorRT
 // =============================================================================
 
 __global__ void deinterleave_iq_kernel(const float2* src, float* dst, int n) {
@@ -197,78 +197,6 @@ void ddc_deinterleave_iq(const float2* src, float* dst, int n, cudaStream_t stre
   int threads = 256;
   int blocks = (n + threads - 1) / threads;
   deinterleave_iq_kernel<<<blocks, threads, 0, stream>>>(src, dst, n);
-}
-
-// =============================================================================
-// Spectrogram via per-bin DFT (not FFT). spec_freq=64 bins makes DFT cheaper
-// than cuFFT setup overhead. Each thread computes one (time, freq) bin.
-// Normalization to [0,1] done on CPU — buffer is small (128×64 = 32KB).
-// Must match STFT parameters in train_amc.py (Hanning, 128 time, 64 freq).
-// =============================================================================
-
-__global__ void spectrogram_kernel(const float2* in, float* out, int n_iq,
-                                   const float* window, int win_len,
-                                   int spec_time, int spec_freq) {
-  // Each thread computes one (time, freq) bin
-  int t = blockIdx.x;
-  int f = threadIdx.x;
-  if (t >= spec_time || f >= spec_freq) return;
-
-  int hop = n_iq / spec_time;
-  int start = t * hop;
-  int half_freq = spec_freq / 2;
-
-  // Compute one FFT bin via DFT (small spec_freq, GPU-parallel across freq)
-  // fftshift: map output bin f to DFT bin k
-  int k = f - half_freq;
-
-  float sum_re = 0, sum_im = 0;
-  for (int n = 0; n < win_len && (start + n) < n_iq; n++) {
-    float w = window[n];
-    float re = in[start + n].x * w;
-    float im = in[start + n].y * w;
-
-    float phase = -2.0f * CUDART_PI_F * k * n / win_len;
-    float cos_p = __cosf(phase);
-    float sin_p = __sinf(phase);
-
-    sum_re += re * cos_p - im * sin_p;
-    sum_im += re * sin_p + im * cos_p;
-  }
-
-  float mag = sqrtf(sum_re * sum_re + sum_im * sum_im);
-  mag = fmaxf(mag, 1e-10f);
-  out[t * spec_freq + f] = 20.0f * log10f(mag);
-}
-
-__global__ void normalize_spectrogram_kernel(float* data, int total, float min_val, float range) {
-  int i = blockIdx.x * blockDim.x + threadIdx.x;
-  if (i >= total) return;
-  data[i] = (data[i] - min_val) / range;
-}
-
-void ddc_compute_spectrogram(const float2* in, float* out, int n_iq,
-                             const float* window, int win_len,
-                             int spec_time, int spec_freq,
-                             cudaStream_t stream) {
-  // One block per time step, spec_freq threads per block
-  spectrogram_kernel<<<spec_time, spec_freq, 0, stream>>>(
-      in, out, n_iq, window, win_len, spec_time, spec_freq);
-
-  // Find min/max for normalization (small buffer — do on CPU)
-  int total = spec_time * spec_freq;
-  std::vector<float> h_spec(total);
-  cudaMemcpyAsync(h_spec.data(), out, total * sizeof(float), cudaMemcpyDeviceToHost, stream);
-  cudaStreamSynchronize(stream);
-
-  float min_val = *std::min_element(h_spec.begin(), h_spec.end());
-  float max_val = *std::max_element(h_spec.begin(), h_spec.end());
-  float range = max_val - min_val;
-  if (range < 1e-6f) range = 1.0f;
-
-  int threads = 256;
-  int blocks = (total + threads - 1) / threads;
-  normalize_spectrogram_kernel<<<blocks, threads, 0, stream>>>(out, total, min_val, range);
 }
 
 // =============================================================================

@@ -57,7 +57,7 @@ void ImGuiSinkOp::compute(InputContext& op_input, OutputContext&, ExecutionConte
     display_->submit_frame(a, host_buf_.data(), bins);
   }
 
-  // Sync GUI DDC selections → DDC channel activation
+  // Sync GUI DDC selections -> DDC channel activation
   if (ddc_manager_) {
     for (int s = 0; s < DDCManager::NUM_SLOTS; s++) {
       const auto& slot = display_->get_ddc_slot(s);
@@ -86,7 +86,7 @@ void ImGuiSinkOp::compute(InputContext& op_input, OutputContext&, ExecutionConte
         ddc_cfg.antenna = slot.antenna;
         ddc_manager_->activate_channel(s, ddc_cfg);
       } else if (!slot.active && ddc_manager_->is_active(s)) {
-        // Cleared — deactivate
+        // Cleared -- deactivate
         ddc_manager_->deactivate_channel(s);
       }
 

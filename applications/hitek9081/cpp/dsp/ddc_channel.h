@@ -1,4 +1,4 @@
-// Time-domain DDC: NCO mix → FIR lowpass → decimate → normalize.
+// Time-domain DDC: NCO mix -> FIR lowpass -> decimate -> normalize.
 // Operates on raw int16 IQ from RxOp (not FFT output).
 // Each channel has its own CUDA stream for independent processing.
 //
@@ -18,7 +18,7 @@ class DDCChannel {
     double center_freq_mhz = 0;     // absolute freq where user clicked
     double lo_freq_mhz = 0;         // ADC center frequency (from CLI --center-freq)
     double bandwidth_mhz = 1.0;     // selected DDC bandwidth
-    double sample_rate_mhz = 983.04;
+    double sample_rate_mhz = 491.52;
     int input_length = 0;           // raw IQ samples per frame (fft_size)
     int output_length = 4096;       // samples for AMC model
     int antenna = 0;
@@ -44,7 +44,7 @@ class DDCChannel {
     double offset_mhz = cfg_.center_freq_mhz - cfg_.lo_freq_mhz;
     freq_offset_norm_ = offset_mhz / cfg_.sample_rate_mhz;
 
-    // Nyquist: output rate = bandwidth → decim = sr/bw
+    // Nyquist: output rate = bandwidth -> decim = sr/bw
     decim_factor_ = std::max(1, static_cast<int>(cfg_.sample_rate_mhz / cfg_.bandwidth_mhz));
 
     // FIR cutoff at half-bandwidth normalized to input rate.
@@ -54,7 +54,7 @@ class DDCChannel {
 
     cudaStreamCreate(&stream_);
     cudaEventCreate(&sync_evt_);
-    // Persistent scratch for ddc_normalize_power — avoids per-frame cudaMalloc
+    // Persistent scratch for ddc_normalize_power -- avoids per-frame cudaMalloc
     cudaMalloc(&power_scratch_d_, sizeof(float));
 
     int N = cfg_.input_length;
@@ -95,7 +95,7 @@ class DDCChannel {
     if (stream_) { cudaStreamDestroy(stream_); stream_ = nullptr; }
   }
 
-  // Process one frame of raw IQ. src_stream is SpectralPipeline's stream —
+  // Process one frame of raw IQ. src_stream is SpectralPipeline's stream --
   // we wait on it via event to ensure IQ data is committed before reading.
   void process(const int16_t* raw_iq, cudaStream_t src_stream) {
     if (!active_) return;
@@ -117,7 +117,7 @@ class DDCChannel {
     // 3. Decimate
     ddc_decimate(filtered_d_, decimated_d_, N, decim_factor_, stream_);
 
-    // 4. Fill output buffer — tile if decimated output < 4096, truncate if >
+    // 4. Fill output buffer -- tile if decimated output < 4096, truncate if >
     int src_len = decim_output_len_;
     if (src_len >= cfg_.output_length) {
       cudaMemcpyAsync(iq_out_d_, decimated_d_, cfg_.output_length * sizeof(float2),

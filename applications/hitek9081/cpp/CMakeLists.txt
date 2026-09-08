@@ -32,7 +32,7 @@ find_package(daqiri REQUIRED CONFIG)
 include(HoloHubDaqiri)
 
 # ---------------------------------------------------------------------------
-# Fetch hololink source — only build the core library (for FPGA bringup).
+# Fetch hololink source -- only build the core library (for FPGA bringup).
 # ---------------------------------------------------------------------------
 find_package(Git REQUIRED)
 include(FetchContent)
@@ -50,7 +50,7 @@ endif()
 set(HOLOLINK_SRC "${hololink_SOURCE_DIR}/src")
 find_package(fmt REQUIRED)
 
-# hololink_core (Enumerator, DataChannel, Hololink — FPGA bringup)
+# hololink_core (Enumerator, DataChannel, Hololink -- FPGA bringup)
 add_library(hololink_core STATIC
   ${HOLOLINK_SRC}/hololink/core/arp_wrapper.cpp
   ${HOLOLINK_SRC}/hololink/core/data_channel.cpp

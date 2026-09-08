@@ -98,12 +98,12 @@ void SpectralOp::initialize() {
     if (ddc_manager_->initialize_amc(amc_model_path_.get(), 4096)) {
       HOLOSCAN_LOG_INFO("AMC inference engine ready: {}", amc_model_path_.get());
     } else {
-      HOLOSCAN_LOG_WARN("AMC model failed to load: {} — classification disabled",
+      HOLOSCAN_LOG_WARN("AMC model failed to load: {} -- classification disabled",
                         amc_model_path_.get());
     }
   }
 
-  HOLOSCAN_LOG_INFO("SpectralOp::initialize() — fft={} antennas={} averages={} dB=[{},{}] "
+  HOLOSCAN_LOG_INFO("SpectralOp::initialize() -- fft={} antennas={} averages={} dB=[{},{}] "
                     "iq_swap={} bins=[{},{}] mode={}",
                     N, A, num_averages_.get(), db_min_.get(), db_max_.get(),
                     iq_swap_.get(), resolved_bin_start_, resolved_bin_end_,
@@ -115,7 +115,7 @@ void SpectralOp::compute(InputContext& op_input, OutputContext& op_output, Execu
 
   if (maybe_input) {
     const auto& input = maybe_input.value();
-    // RX operator emits async — GPU-side wait for copies to complete
+    // RX operator emits async -- GPU-side wait for copies to complete
     if (sync_event_) {
       cudaStreamWaitEvent(pipeline_.stream(), sync_event_, 0);
     }

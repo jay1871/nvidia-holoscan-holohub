@@ -23,7 +23,7 @@
  * spectrum in real-time via Holoviz.
  *
  * Pipeline:
- *   Hitek9081RxOp ──→ SpectralOp ──→ ImGuiDisplay / HolovizOp
+ *   Hitek9081RxOp --> SpectralOp --> ImGuiDisplay / HolovizOp
  *   (DPDK RX,       (window, FFT,    (spectrum & waterfall display)
  *    raw IQ out)     averaging,
  *                    magnitude)
@@ -32,8 +32,8 @@
  *   ./hitek9081 <config.yaml> --sr <MHz> --center-freq <MHz> [options]
  *
  *   Required:
- *     --sr MHz            Sample rate in MHz (e.g., 245.76, 750)
- *     --center-freq MHz   Center frequency in MHz (e.g., 3500, 1500)
+ *     --sr MHz            Sample rate in MHz (e.g., 491.52)
+ *     --center-freq MHz   Center frequency in MHz (e.g., 750, 2400)
  *
  *   Options:
  *     --fft-size N        FFT size, power of 2, 512-1048576 (default: 65536)
@@ -44,11 +44,8 @@
  *     -h, --help          Show usage
  *
  *   Examples:
- *     ./hitek9081 hitek9081.yaml --sr 245.76 --center-freq 3500 \
- *         --fft-size 65536 --num-averages 8
- *
- *     ./hitek9081 hitek9081.yaml --sr 750 --center-freq 1500 \
- *         --fft-size 65536 --num-averages 8 --freq-min 350 --freq-max 1050
+ *     ./hitek9081 hitek9081.yaml --sr 491.52 --center-freq 750 \
+ *         --fft-size 131072 --num-averages 1
  *
  * YAML Configuration (hsb section):
  *   payload_size        FPGA payload bytes per packet (from pcap RETH DMA_len)
@@ -71,7 +68,7 @@
  *   We inject hsb.mtu into channel_metadata BEFORE DataChannel construction
  *   so configure_roce() programs the correct value on the first VP_MASK enable.
  *   The hardware latches DP_PACKET_SIZE on the VP_MASK rising edge and does
- *   NOT re-read it on subsequent enables — post-hoc overrides have no effect.
+ *   NOT re-read it on subsequent enables -- post-hoc overrides have no effect.
  *   Always set mtu >= payload_size to avoid fragmentation.
  */
 
@@ -105,7 +102,7 @@ void print_usage(const char* prog)
               << "  --hololink IP       HSB data-plane IP (default: from YAML)\n"
               << "  --imgui             Use ImGui/ImPlot GUI (default when built with ImGui)\n"
               << "  --holoviz           Use Holoviz renderer instead of ImGui\n"
-              << "  --waterfall         Enable waterfall spectrogram in ImGui\n"
+              << "  --waterfall         Enable waterfall display in ImGui\n"
               << "  -h, --help          Show this help\n";
 }
 

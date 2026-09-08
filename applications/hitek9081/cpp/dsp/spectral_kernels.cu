@@ -52,7 +52,7 @@ __global__ void normalize_to_coords_kernel(const float* in, float* out,
     if (flip_x) x = 1.0f - x;
     float y = (in[bin_start + i] - db_min) / (db_max - db_min);
     y = fminf(fmaxf(y, 0.0f), 1.0f);
-    y = 1.0f - y;  // Holoviz Y: 0=top, 1=bottom — invert so dB_max renders at top
+    y = 1.0f - y;  // Holoviz Y: 0=top, 1=bottom -- invert so dB_max renders at top
     out[2 * i] = x;
     out[2 * i + 1] = y;
   }
@@ -79,7 +79,7 @@ __global__ void power_to_db_kernel(const float* accum, float* out, int n, int nu
   if (i < n) {
     float avg_power = accum[i] / static_cast<float>(num_averages);
     if (avg_power < 1e-40f) avg_power = 1e-40f;  // floor below IEEE denorm to prevent log10(0)
-    // ref = N × fullscale × 0.25: N = FFT processing gain, 0.25 = Hanning coherent gain (0.5) × single-sided (0.5)
+    // ref = N * fullscale * 0.25: N = FFT processing gain, 0.25 = Hanning coherent gain (0.5) * single-sided (0.5)
     float ref = (float)n * adc_fullscale * 0.25f;
     out[i] = 10.0f * log10f(avg_power / (ref * ref));
   }
@@ -146,7 +146,7 @@ void dc_mean_int16(const int16_t* in, float* mean_iq, int num_samples,
 }
 
 // ============================================================================
-// Window + DC subtract + int16→float2 (fused second pass)
+// Window + DC subtract + int16->float2 (fused second pass)
 // ============================================================================
 
 __global__ void window_dcblock_int16_to_float2_kernel(const int16_t* in, const float* window,
@@ -189,12 +189,12 @@ void apply_window_dcblock_int16_to_float2(const int16_t* in, const float* window
 }
 
 // ============================================================================
-// Window + int16→float2 (no DC subtraction)
+// Window + int16->float2 (no DC subtraction)
 // ============================================================================
 
 // iq_swap: 0=I,Q as-is from ADC
 //          1=swap Q,I (reversed JESD lane mapping)
-//          2=conjugate (negate Q — upper sideband conversion)
+//          2=conjugate (negate Q -- upper sideband conversion)
 __global__ void window_int16_to_float2_kernel(const int16_t* in, const float* window,
                                               float2* out, int num_samples, int iq_swap) {
   int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -259,13 +259,13 @@ __global__ void magnitude_db_fftshift_f32_kernel(const float2* in, float* out, i
                                                  int reverse, float adc_fullscale) {
   int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i < n) {
-    // fftshift: natural order (DC=0) → display order (DC=N/2)
+    // fftshift: natural order (DC=0) -> display order (DC=N/2)
     int src = reverse ? (n / 2 - i + n) % n : (i + n / 2) % n;
     float re = in[src].x;
     float im = in[src].y;
     float mag_sq = re * re + im * im;
     if (mag_sq < 1e-40f) mag_sq = 1e-40f;  // floor below IEEE denorm to prevent log10(0)
-    // ref = N × fullscale × 0.25: N = FFT gain, 0.25 = Hanning coherent gain (0.5) × single-sided (0.5)
+    // ref = N * fullscale * 0.25: N = FFT gain, 0.25 = Hanning coherent gain (0.5) * single-sided (0.5)
     float ref = (float)n * adc_fullscale * 0.25f;
     out[i] = 10.0f * log10f(mag_sq / (ref * ref));
   }
@@ -279,7 +279,7 @@ void magnitude_db_fftshift_f32(const float2* in, float* out, int n,
 }
 
 // ============================================================================
-// Interpolate DC bin (cosmetic) — fills the fftshifted DC region with neighbors
+// Interpolate DC bin (cosmetic) -- fills the fftshifted DC region with neighbors
 // ============================================================================
 
 __global__ void interpolate_dc_kernel(float* data, int n, int half_width) {
@@ -309,7 +309,7 @@ void interpolate_dc_bin(float* data, int n, int half_width, cudaStream_t stream)
 // Peak-downsample: reduce N bins to out_bins by taking max per stride
 // ============================================================================
 
-// Peak (max-hold) downsample — preserves signal peaks in display.
+// Peak (max-hold) downsample -- preserves signal peaks in display.
 // Uses float stride so output bins map uniformly to the full input range.
 // This ensures freq_axis[i] = freq_min + i * (freq_max - freq_min) / (out_bins - 1)
 // correctly maps to the downsampled output.
@@ -394,7 +394,7 @@ void gather_iq_from_batch(const void* src, int16_t* dst,
 //
 // Each pkt_ptrs[i] points directly into DAQIRI's host_pinned buffer pool.
 // On unified-memory systems (DGX Spark), GPU kernels can dereference these
-// pointers without any cudaMemcpy — CPU and GPU share the same LPDDR5 RAM.
+// pointers without any cudaMemcpy -- CPU and GPU share the same LPDDR5 RAM.
 // ============================================================================
 
 __global__ void gather_iq_scattered_kernel(
