@@ -24,6 +24,7 @@
 #include <hololink/core/hololink.hpp>
 #include <hololink/core/htk_jesd.hpp>
 #include <cuda.h>
+#include <atomic>
 #include <memory>
 #include <vector>
 #include <string>
@@ -85,5 +86,5 @@ class HsbDeviceManager {
   std::vector<std::unique_ptr<hololink::DataChannel>> hololink_channels_;
   std::shared_ptr<hololink::Hololink> hololink_;
   std::shared_ptr<hololink::HTK_JESD_HPS_Config> mxfe_config_;
-  bool is_streaming_ = false;
+  std::atomic<bool> is_streaming_{false};
 };

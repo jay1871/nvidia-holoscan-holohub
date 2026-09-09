@@ -42,3 +42,5 @@ class App : public holoscan::Application {
 
   AppConfig cfg_;
 };
+
+void request_app_shutdown();

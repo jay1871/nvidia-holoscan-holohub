@@ -103,10 +103,8 @@ void App::compose() {
 
     imgui_display_ = std::make_shared<ImGuiDisplay>(disp_cfg);
     imgui_display_->set_close_callback([this]() {
-      HOLOSCAN_LOG_INFO("GUI closed -- stopping pipeline...");
-      if (this->is_alive) {
-        this->is_alive->disable_tick();
-      }
+      HOLOSCAN_LOG_INFO("GUI closed -- triggering shutdown...");
+      request_app_shutdown();
     });
 
     auto imgui_sink = make_operator<ops::ImGuiSinkOp>(

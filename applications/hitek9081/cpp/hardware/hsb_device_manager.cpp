@@ -194,7 +194,7 @@ bool HsbDeviceManager::start_streaming() {
 }
 
 void HsbDeviceManager::stop_streaming() {
-  if (!is_streaming_) return;
+  if (!is_streaming_.exchange(false)) return;
 
   for (auto& ch : hololink_channels_) {
     if (ch) ch->unconfigure();
@@ -204,6 +204,4 @@ void HsbDeviceManager::stop_streaming() {
     hololink_->stop();
     HOLOSCAN_LOG_INFO("Hololink stopped.");
   }
-
-  is_streaming_ = false;
 }

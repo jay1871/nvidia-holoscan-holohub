@@ -16,6 +16,7 @@
  */
 
 #include "imgui_sink_op.h"
+#include "app.h"
 
 #ifdef HAS_IMGUI
 
@@ -37,9 +38,7 @@ void ImGuiSinkOp::initialize() {
 
 void ImGuiSinkOp::compute(InputContext& op_input, OutputContext&, ExecutionContext&) {
   if (display_ && display_->should_close()) {
-    if (is_alive_) {
-      is_alive_->disable_tick();
-    }
+    request_app_shutdown();
     return;
   }
   if (!display_) return;

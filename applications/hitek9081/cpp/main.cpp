@@ -84,6 +84,8 @@
 #include <iostream>
 #include <string>
 #include <csignal>
+#include <atomic>
+#include <thread>
 
 void print_usage(const char* prog)
 {
@@ -110,12 +112,38 @@ void print_usage(const char* prog)
 bool is_power_of_2(int n) { return n > 0 && (n & (n - 1)) == 0; }
 
 static App* g_active_app = nullptr;
+static HsbDeviceManager* g_hsb = nullptr;
+static std::atomic<bool> g_shutting_down{false};
+
+void request_app_shutdown() {
+  if (g_shutting_down.exchange(true)) return;
+
+  HOLOSCAN_LOG_INFO("Shutdown initiated -- stopping FPGA streaming...");
+  if (g_hsb) {
+    g_hsb->stop_streaming();
+  }
+
+  if (g_active_app) {
+    if (g_active_app->is_alive) {
+      g_active_app->is_alive->disable_tick();
+    }
+    g_active_app->stop_execution();
+  }
+
+  // Watchdog thread ensures process completes exit within 1 second
+  // if GXF scheduler threads are blocked in a poll or condition
+  std::thread watchdog([]() {
+    std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+    HOLOSCAN_LOG_INFO("Shutdown watchdog: completing exit.");
+    daqiri::shutdown();
+    std::exit(0);
+  });
+  watchdog.detach();
+}
 
 void signalHandler(int signal_num) {
-  if (g_active_app != nullptr) {
-	  std::cerr << "\nctl-c pressed\n";
-	  g_active_app->is_alive->disable_tick();
-  }
+  std::cerr << "\nSignal " << signal_num << " received -- shutting down...\n";
+  request_app_shutdown();
 }
 
 
@@ -277,6 +305,8 @@ int main(int argc, char** argv) {
     return 1;
   }
 
+  g_hsb = &hsb;
+
   std::signal(SIGINT, signalHandler);
   std::signal(SIGTERM, signalHandler);
 
@@ -291,7 +321,7 @@ int main(int argc, char** argv) {
   // -------------------------------------------------------------------------
   // Teardown
   // -------------------------------------------------------------------------
-  hsb.stop_streaming();
+  request_app_shutdown();
 
   daqiri::print_stats();
   daqiri::shutdown();
