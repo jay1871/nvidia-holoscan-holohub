@@ -150,7 +150,7 @@ hitek9081_rx:
 spectral:
   iq_swap: 0                    # 0=I,Q as-is  1=swap Q,I  2=I,Q conjugate (negate Q)
   adc_bits: 16                  # ADC resolution
-  amc_model_path: "/workspace/holohub/applications/hitek9081/models/amc_raw_iq_convnext_2500.onnx"  # Path to ONNX model (empty = classification disabled)
+  amc_model_path: "/workspace/holohub/applications/hitek9081/models/amc_raw_iq_convnext_0db.onnx"  # Path to ONNX model (empty = classification disabled)
   # amc_model_path: ""  # Path to ONNX model (empty = classification disabled)
   db_min: -120.0
   db_max: -10.0

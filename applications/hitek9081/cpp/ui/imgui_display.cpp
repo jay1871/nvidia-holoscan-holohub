@@ -45,14 +45,6 @@ ImGuiDisplay::ImGuiDisplay(const Config& cfg) : cfg_(cfg) {
     freq_axis_[i] = static_cast<float>(cfg_.freq_min_mhz) + i * freq_step;
   }
 
-  if (cfg_.waterfall_mode) {
-    waterfall_buf_.resize(cfg_.num_antennas);
-    for (auto& buf : waterfall_buf_) {
-      buf.resize(cfg_.waterfall_history * cfg_.num_bins, cfg_.db_min);
-    }
-    waterfall_render_buf_.resize(cfg_.waterfall_history * cfg_.num_bins);
-  }
-
   thread_ = std::thread(&ImGuiDisplay::render_loop, this);
 }
 
@@ -131,6 +123,10 @@ void ImGuiDisplay::render_loop() {
   ImGui_ImplOpenGL3_Init("#version 330");
   ImPlot::GetInputMap().Select = ImGuiMouseButton_Middle;
 
+  if (cfg_.waterfall_mode) {
+    init_waterfall_textures();
+  }
+
   auto last_fps_time = std::chrono::steady_clock::now();
   uint64_t last_pipeline_frames = 0;
 
@@ -200,6 +196,10 @@ void ImGuiDisplay::render_loop() {
     if (frame_dur < 8000) {  // Cap at ~125 FPS max
       std::this_thread::sleep_for(std::chrono::microseconds(8000 - frame_dur));
     }
+  }
+
+  if (cfg_.waterfall_mode) {
+    destroy_waterfall_textures();
   }
 
   ImGui_ImplOpenGL3_Shutdown();
@@ -324,8 +324,48 @@ void ImGuiDisplay::render_line_plot(int antenna, float width, float height) {
   ImPlot::PopStyleColor();
 }
 
+void ImGuiDisplay::init_waterfall_textures() {
+  wf_tex_.resize(cfg_.num_antennas, 0);
+  glGenTextures(cfg_.num_antennas, wf_tex_.data());
+
+  // Initialize Viridis 256-entry RGBA LUT
+  for (int i = 0; i < 256; i++) {
+    ImVec4 c = ImPlot::SampleColormap(i / 255.0f, ImPlotColormap_Viridis);
+    uint8_t r = static_cast<uint8_t>(std::clamp(c.x * 255.0f, 0.0f, 255.0f));
+    uint8_t g = static_cast<uint8_t>(std::clamp(c.y * 255.0f, 0.0f, 255.0f));
+    uint8_t b = static_cast<uint8_t>(std::clamp(c.z * 255.0f, 0.0f, 255.0f));
+    uint8_t a = 255;
+    viridis_lut_[i] = (static_cast<uint32_t>(a) << 24) |
+                      (static_cast<uint32_t>(b) << 16) |
+                      (static_cast<uint32_t>(g) << 8)  |
+                      static_cast<uint32_t>(r);
+  }
+  viridis_lut_initialized_ = true;
+  wf_row_rgba_.resize(cfg_.num_bins);
+
+  std::vector<uint32_t> empty_pixels(cfg_.num_bins * cfg_.waterfall_history, viridis_lut_[0]);
+  for (int a = 0; a < cfg_.num_antennas; a++) {
+    glBindTexture(GL_TEXTURE_2D, wf_tex_[a]);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, cfg_.num_bins, cfg_.waterfall_history,
+                 0, GL_RGBA, GL_UNSIGNED_BYTE, empty_pixels.data());
+  }
+  glBindTexture(GL_TEXTURE_2D, 0);
+  wf_tex_initialized_ = true;
+}
+
+void ImGuiDisplay::destroy_waterfall_textures() {
+  if (wf_tex_initialized_) {
+    glDeleteTextures(cfg_.num_antennas, wf_tex_.data());
+    wf_tex_initialized_ = false;
+  }
+}
+
 void ImGuiDisplay::render_waterfall_plot(int antenna, float width, float height) {
-  if (cur_read_idx_ < 0) return;
+  if (cur_read_idx_ < 0 || !wf_tex_initialized_) return;
 
   // Append to waterfall only when new data arrives, track timing
   if (antenna == 0 && cur_read_idx_ != last_waterfall_idx_) {
@@ -340,10 +380,22 @@ void ImGuiDisplay::render_waterfall_plot(int antenna, float width, float height)
     }
     last_time = now;
 
+    float db_range = cfg_.db_max - cfg_.db_min;
+    float inv_range = (db_range > 0.0f) ? (255.0f / db_range) : 1.0f;
+
     for (int a = 0; a < cfg_.num_antennas; a++) {
-      float* row = waterfall_buf_[a].data() + waterfall_write_pos_ * cfg_.num_bins;
-      std::memcpy(row, buffers_[cur_read_idx_].antenna_data[a].data(), cfg_.num_bins * sizeof(float));
+      const float* row_db = buffers_[cur_read_idx_].antenna_data[a].data();
+      for (int b = 0; b < cfg_.num_bins; b++) {
+        int idx = static_cast<int>((row_db[b] - cfg_.db_min) * inv_range);
+        idx = std::clamp(idx, 0, 255);
+        wf_row_rgba_[b] = viridis_lut_[idx];
+      }
+      glBindTexture(GL_TEXTURE_2D, wf_tex_[a]);
+      glTexSubImage2D(GL_TEXTURE_2D, 0, 0, waterfall_write_pos_,
+                      cfg_.num_bins, 1, GL_RGBA, GL_UNSIGNED_BYTE, wf_row_rgba_.data());
     }
+    glBindTexture(GL_TEXTURE_2D, 0);
+
     waterfall_write_pos_ = (waterfall_write_pos_ + 1) % cfg_.waterfall_history;
     last_waterfall_idx_ = cur_read_idx_;
   }
@@ -361,27 +413,17 @@ void ImGuiDisplay::render_waterfall_plot(int antenna, float width, float height)
     ImPlot::SetupAxisLimits(ImAxis_Y1, 0, actual_span, ImPlotCond_Always);
     ImPlot::SetupAxis(ImAxis_Y1, nullptr, ImPlotAxisFlags_Invert | ImPlotAxisFlags_NoTickLabels | ImPlotAxisFlags_NoTickMarks);
 
-    ImPlot::PushColormap(ImPlotColormap_Viridis);
+    // Hardware texture UV scrolling:
+    // With GL_REPEAT on T, newest row sits at Y=0 (top) and oldest at Y=actual_span (bottom).
+    float H = static_cast<float>(cfg_.waterfall_history);
+    float v_newest = static_cast<float>(waterfall_write_pos_) / H;
+    float v_oldest = v_newest - 1.0f;
 
-    // Reorder circular buffer into pre-allocated render buffer
-    int tail = cfg_.waterfall_history - waterfall_write_pos_;
-    std::memcpy(waterfall_render_buf_.data(),
-                waterfall_buf_[antenna].data() + waterfall_write_pos_ * cfg_.num_bins,
-                tail * cfg_.num_bins * sizeof(float));
-    if (waterfall_write_pos_ > 0) {
-      std::memcpy(waterfall_render_buf_.data() + tail * cfg_.num_bins,
-                  waterfall_buf_[antenna].data(),
-                  waterfall_write_pos_ * cfg_.num_bins * sizeof(float));
-    }
-
-    ImPlot::PlotHeatmap("##wf", waterfall_render_buf_.data(),
-                        cfg_.waterfall_history, cfg_.num_bins,
-                        cfg_.db_min, cfg_.db_max,
-                        nullptr,
-                        ImPlotPoint(cfg_.freq_min_mhz, 0),
-                        ImPlotPoint(cfg_.freq_max_mhz, actual_span));
-
-    ImPlot::PopColormap();
+    ImPlot::PlotImage("##wf", static_cast<ImTextureID>(wf_tex_[antenna]),
+                      ImPlotPoint(cfg_.freq_min_mhz, 0),
+                      ImPlotPoint(cfg_.freq_max_mhz, actual_span),
+                      ImVec2(0.0f, v_oldest),
+                      ImVec2(1.0f, v_newest));
 
     // Draw DDC bandwidth shaded regions on waterfall
     for (int d = 0; d < NUM_DDC_SLOTS; d++) {

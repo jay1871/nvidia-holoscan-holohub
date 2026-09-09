@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import math
 import os
 import sys
 import time
@@ -74,10 +75,7 @@ warnings.filterwarnings("ignore", message="generated signal is too large")
 # ---------------------------------------------------------------------------
 # Signal class list -- TorchSig's full 69-class set
 # ---------------------------------------------------------------------------
-if HAS_TORCHSIG:
-    MODULATION_CLASSES = list(TorchSigSignalLists.all_signals)
-else:
-    MODULATION_CLASSES = [
+MODULATION_CLASSES = [
         "ook",
         "4ask",
         "8ask",
@@ -254,8 +252,8 @@ def compute_per_class_f1(targets: list[int], preds: list[int], num_classes: int)
 # ---------------------------------------------------------------------------
 
 
-def make_raw_iq_collate_fn():
-    """Create collate function for raw IQ [2, N] tensors with power normalization."""
+def make_raw_iq_collate_fn(cfo_max: float = 0.0, phase_jitter: bool = True):
+    """Create collate function for raw IQ [2, N] tensors with power normalization and CFO augmentation."""
 
     def collate_fn(batch: list) -> tuple[torch.Tensor, torch.Tensor]:
         iqs = []
@@ -265,6 +263,28 @@ def make_raw_iq_collate_fn():
             if isinstance(data, np.ndarray):
                 data = torch.from_numpy(data)
             # data is [2, N] where channel 0 is I and channel 1 is Q
+            data = data.float()
+            N = data.shape[-1]
+
+            if cfo_max > 0.0:
+                # Random CFO in [-cfo_max, +cfo_max] cycles per sample
+                delta_f = (torch.rand(1).item() * 2.0 - 1.0) * cfo_max
+                phi0 = torch.rand(1).item() * 2.0 * math.pi if phase_jitter else 0.0
+                t = torch.arange(N, dtype=torch.float32)
+                phase = 2.0 * math.pi * delta_f * t + phi0
+                cos_p = torch.cos(phase)
+                sin_p = torch.sin(phase)
+                i_rot = data[0] * cos_p - data[1] * sin_p
+                q_rot = data[0] * sin_p + data[1] * cos_p
+                data = torch.stack([i_rot, q_rot])
+            elif phase_jitter:
+                phi0 = torch.rand(1).item() * 2.0 * math.pi
+                cos_p = math.cos(phi0)
+                sin_p = math.sin(phi0)
+                i_rot = data[0] * cos_p - data[1] * sin_p
+                q_rot = data[0] * sin_p + data[1] * cos_p
+                data = torch.stack([i_rot, q_rot])
+
             power = torch.mean(data[0] ** 2 + data[1] ** 2)
             if power > 1e-10:
                 data = data / torch.sqrt(power)
@@ -570,8 +590,8 @@ def train(args: argparse.Namespace) -> None:
         "cochannel_overlap_probability": 0.0,
         "signal_duration_in_samples_min": args.input_length // 2,
         "signal_duration_in_samples_max": args.input_length,
-        "bandwidth_min": 1000,
-        "bandwidth_max": 2000,
+        "bandwidth_min": args.bandwidth_min,
+        "bandwidth_max": args.bandwidth_max,
     }
     base_meta = TorchSigDefaults().default_dataset_metadata
     dataset_metadata = dict(base_meta)
@@ -600,17 +620,18 @@ def train(args: argparse.Namespace) -> None:
     train_batches_per_epoch = train_samples // args.batch_size
     val_batches_per_epoch = max(20, train_batches_per_epoch // 5)
 
+    collate = make_raw_iq_collate_fn(cfo_max=args.cfo_max, phase_jitter=args.phase_jitter)
     train_loader = WorkerSeedingDataLoader(
         train_dataset,
         batch_size=args.batch_size,
-        collate_fn=make_raw_iq_collate_fn(),
+        collate_fn=collate,
         num_workers=num_workers,
         persistent_workers=True if num_workers > 0 else False,
     )
     val_loader = WorkerSeedingDataLoader(
         val_dataset,
         batch_size=args.batch_size,
-        collate_fn=make_raw_iq_collate_fn(),
+        collate_fn=collate,
         num_workers=num_workers,
         persistent_workers=True if num_workers > 0 else False,
     )
@@ -622,6 +643,15 @@ def train(args: argparse.Namespace) -> None:
         val_batches_per_epoch,
         num_workers,
         max_cores,
+    )
+    log.info(
+        "Config: SNR [%.1f, %.1f] dB | BW [%.0f, %.0f] Hz | CFO max: %.3f | Phase jitter: %s",
+        args.snr_min,
+        args.snr_max,
+        args.bandwidth_min,
+        args.bandwidth_max,
+        args.cfo_max,
+        args.phase_jitter,
     )
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-2)
@@ -647,13 +677,27 @@ def train(args: argparse.Namespace) -> None:
     if args.resume and isinstance(ckpt, dict):
         if "optimizer_state" in ckpt:
             optimizer.load_state_dict(ckpt["optimizer_state"])
+            if args.override_lr:
+                for pg in optimizer.param_groups:
+                    pg["lr"] = args.lr
+                log.info("  Overrode optimizer LR to: %g", args.lr)
         if "scheduler_state" in ckpt:
             scheduler.load_state_dict(ckpt["scheduler_state"])
-        best_acc = ckpt.get("best_acc", 0.0)
-        best_fam_acc = ckpt.get("best_fam_acc", 0.0)
-        best_val_loss = ckpt.get("best_val_loss", float("inf"))
-        early_stop_counter = ckpt.get("early_stop_counter", 0)
-        if "history" in ckpt:
+            if args.override_lr:
+                scheduler.best = float("inf")
+                scheduler.num_bad_epochs = 0
+        if args.override_lr:
+            best_acc = 0.0
+            best_fam_acc = 0.0
+            best_val_loss = float("inf")
+            early_stop_counter = 0
+            log.info("  Fine-tuning mode: reset baseline best_val_loss and best_acc for new distribution")
+        else:
+            best_acc = ckpt.get("best_acc", 0.0)
+            best_fam_acc = ckpt.get("best_fam_acc", 0.0)
+            best_val_loss = ckpt.get("best_val_loss", float("inf"))
+            early_stop_counter = ckpt.get("early_stop_counter", 0)
+        if "history" in ckpt and not args.override_lr:
             history = ckpt["history"]
 
     all_preds: list[int] = []
@@ -908,6 +952,42 @@ def main() -> None:
         type=float,
         default=30.0,
         help="Maximum SNR in dB for synthetic signals",
+    )
+    parser.add_argument(
+        "--bandwidth-min",
+        type=float,
+        default=1000.0,
+        help="Minimum signal bandwidth in Hz (sample_rate=10000, default 1000 = 10%% fs)",
+    )
+    parser.add_argument(
+        "--bandwidth-max",
+        type=float,
+        default=4000.0,
+        help="Maximum signal bandwidth in Hz (sample_rate=10000, default 4000 = 40%% fs)",
+    )
+    parser.add_argument(
+        "--cfo-max",
+        type=float,
+        default=0.0,
+        help="Maximum normalized carrier frequency offset (e.g. 0.05 = +/-5%% of sample rate)",
+    )
+    parser.add_argument(
+        "--phase-jitter",
+        dest="phase_jitter",
+        action="store_true",
+        default=True,
+        help="Apply random initial phase rotation [0, 2pi) to signals (default: True)",
+    )
+    parser.add_argument(
+        "--no-phase-jitter",
+        dest="phase_jitter",
+        action="store_false",
+        help="Disable random initial phase rotation",
+    )
+    parser.add_argument(
+        "--override-lr",
+        action="store_true",
+        help="When resuming, override optimizer learning rate with --lr instead of checkpoint LR",
     )
     parser.add_argument(
         "--checkpoint",

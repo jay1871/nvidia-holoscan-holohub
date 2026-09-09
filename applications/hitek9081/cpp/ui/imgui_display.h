@@ -58,10 +58,15 @@ class ImGuiDisplay {
   std::atomic<uint64_t> pipeline_frames_{0};
   int write_idx_ = 0;
 
-  // Waterfall circular buffer: [antenna][history * num_bins]
-  std::vector<std::vector<float>> waterfall_buf_;
-  std::vector<float> waterfall_render_buf_;  // pre-allocated reorder buffer
+  // OpenGL texture-based waterfall
+  std::vector<unsigned int> wf_tex_;
+  bool wf_tex_initialized_ = false;
+  std::vector<uint32_t> wf_row_rgba_;
+  uint32_t viridis_lut_[256] = {};
+  bool viridis_lut_initialized_ = false;
   int waterfall_write_pos_ = 0;
+  void init_waterfall_textures();
+  void destroy_waterfall_textures();
 
   // X-axis values for ImPlot (precomputed frequency array)
   std::vector<float> freq_axis_;

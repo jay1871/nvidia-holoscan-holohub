@@ -20,6 +20,7 @@
 #include "ddc_channel.h"
 #include "amc_inference.h"
 #include <array>
+#include <chrono>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -33,6 +34,7 @@
 class DDCManager {
  public:
   static constexpr int NUM_SLOTS = 16;
+  static constexpr double AMC_INFER_INTERVAL_SEC = 0.066;  // ~15 Hz update rate
 
   DDCManager() = default;
   ~DDCManager() = default;
@@ -47,6 +49,7 @@ class DDCManager {
     if (slot >= 0 && slot < NUM_SLOTS) {
       std::lock_guard<std::mutex> lock(mutex_);
       channels_[slot].activate(cfg);
+      last_infer_time_[slot] = {};  // immediate inference on first frame
     }
   }
 
@@ -91,13 +94,18 @@ class DDCManager {
 
   void process(const int16_t* const* iq_ptrs, int num_antennas, cudaStream_t stream) {
     std::lock_guard<std::mutex> lock(mutex_);
+    auto now = std::chrono::steady_clock::now();
     for (int s = 0; s < NUM_SLOTS; s++) {
       if (channels_[s].is_active()) {
         int ant = channels_[s].antenna();
         if (ant < num_antennas && iq_ptrs[ant]) {
           channels_[s].process(iq_ptrs[ant], stream);
           if (amc_inference_.is_ready()) {
-            amc_inference_.infer(channels_[s]);
+            std::chrono::duration<double> elapsed = now - last_infer_time_[s];
+            if (elapsed.count() >= AMC_INFER_INTERVAL_SEC) {
+              amc_inference_.infer(channels_[s]);
+              last_infer_time_[s] = now;
+            }
           }
         }
       }
@@ -107,5 +115,6 @@ class DDCManager {
  private:
   mutable std::mutex mutex_;
   std::array<DDCChannel, NUM_SLOTS> channels_{};
+  std::array<std::chrono::steady_clock::time_point, NUM_SLOTS> last_infer_time_{};
   AMCInference amc_inference_;
 };
