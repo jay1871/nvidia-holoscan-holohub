@@ -71,7 +71,7 @@ void ImGuiDisplay::frame_complete() {
 }
 
 bool ImGuiDisplay::should_close() const {
-  return closed_.load(std::memory_order_relaxed);
+  return closed_.load(std::memory_order_relaxed) || close_requested_.load(std::memory_order_relaxed);
 }
 
 void ImGuiDisplay::update_classification(int slot, int class_id, float confidence,
@@ -130,7 +130,7 @@ void ImGuiDisplay::render_loop() {
   auto last_fps_time = std::chrono::steady_clock::now();
   uint64_t last_pipeline_frames = 0;
 
-  while (running_.load() && !glfwWindowShouldClose(window)) {
+  while (running_.load() && !glfwWindowShouldClose(window) && !close_requested_.load()) {
     auto frame_start = std::chrono::steady_clock::now();
     glfwPollEvents();
 
@@ -210,6 +210,9 @@ void ImGuiDisplay::render_loop() {
   glfwTerminate();
 
   closed_.store(true);
+  if (close_cb_) {
+    close_cb_();
+  }
 }
 
 void ImGuiDisplay::render_main_panel() {
@@ -452,6 +455,16 @@ void ImGuiDisplay::render_waterfall_plot(int antenna, float width, float height)
 }
 
 void ImGuiDisplay::render_ddc_window_content() {
+  // Exit Application Button
+  ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.70f, 0.15f, 0.15f, 1.0f));
+  ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.85f, 0.20f, 0.20f, 1.0f));
+  ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.55f, 0.10f, 0.10f, 1.0f));
+  if (ImGui::Button("Exit Application", ImVec2(-1, 26))) {
+    close_requested_.store(true);
+  }
+  ImGui::PopStyleColor(3);
+  ImGui::Spacing();
+
   ImVec2 avail = ImGui::GetContentRegionAvail();
   float table_height = selected_ddc_ >= 0 ? avail.y * 0.45f : avail.y;
 

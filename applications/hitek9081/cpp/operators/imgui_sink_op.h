@@ -40,6 +40,7 @@ class ImGuiSinkOp : public Operator {
     center_freq_mhz_ = center_freq_mhz;
     fft_size_ = fft_size;
   }
+  void set_is_alive(std::shared_ptr<holoscan::BooleanCondition> is_alive) { is_alive_ = is_alive; }
 
   void setup(OperatorSpec& spec) override;
   void initialize() override;
@@ -48,6 +49,7 @@ class ImGuiSinkOp : public Operator {
  private:
   std::shared_ptr<ImGuiDisplay> display_;
   std::shared_ptr<DDCManager> ddc_manager_;
+  std::shared_ptr<holoscan::BooleanCondition> is_alive_;
   double sample_rate_mhz_ = 0;
   double center_freq_mhz_ = 0;
   int fft_size_ = 0;

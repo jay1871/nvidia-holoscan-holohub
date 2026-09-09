@@ -36,7 +36,13 @@ void ImGuiSinkOp::initialize() {
 }
 
 void ImGuiSinkOp::compute(InputContext& op_input, OutputContext&, ExecutionContext&) {
-  if (!display_ || display_->should_close()) return;
+  if (display_ && display_->should_close()) {
+    if (is_alive_) {
+      is_alive_->disable_tick();
+    }
+    return;
+  }
+  if (!display_) return;
 
   auto in = op_input.receive<holoscan::TensorMap>("in");
   if (!in) return;

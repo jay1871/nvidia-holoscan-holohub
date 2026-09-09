@@ -102,6 +102,12 @@ void App::compose() {
     disp_cfg.waterfall_mode = cfg_.waterfall;
 
     imgui_display_ = std::make_shared<ImGuiDisplay>(disp_cfg);
+    imgui_display_->set_close_callback([this]() {
+      HOLOSCAN_LOG_INFO("GUI closed -- stopping pipeline...");
+      if (this->is_alive) {
+        this->is_alive->disable_tick();
+      }
+    });
 
     auto imgui_sink = make_operator<ops::ImGuiSinkOp>(
         "imgui_sink",
@@ -110,6 +116,7 @@ void App::compose() {
     imgui_sink->set_display(imgui_display_);
     imgui_sink->set_ddc_manager(ddc_manager);
     imgui_sink->set_signal_params(cfg_.sr_mhz, cfg_.center_freq_mhz, cfg_.fft_size);
+    imgui_sink->set_is_alive(this->is_alive);
 
     add_flow(rx, spectral, {{"iq_out", "iq_in"}});
     add_flow(spectral, imgui_sink, {{"out", "in"}});

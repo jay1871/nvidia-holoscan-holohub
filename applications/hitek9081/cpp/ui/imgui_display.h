@@ -6,9 +6,12 @@
 #include <array>
 #include <vector>
 #include <thread>
+#include <functional>
 
 class ImGuiDisplay {
  public:
+  using CloseCallback = std::function<void()>;
+
   struct Config {
     double freq_min_mhz;
     double freq_max_mhz;
@@ -29,6 +32,8 @@ class ImGuiDisplay {
   void submit_frame(int antenna, const float* db_data, int num_bins);
   void frame_complete();
   bool should_close() const;
+  void request_close() { close_requested_.store(true); }
+  void set_close_callback(CloseCallback cb) { close_cb_ = std::move(cb); }
   void update_classification(int slot, int class_id, float confidence,
                              const int* top3_ids, const float* top3_conf,
                              int family_id, float family_confidence);
@@ -129,6 +134,8 @@ class ImGuiDisplay {
 
   std::atomic<bool> running_{true};
   std::atomic<bool> closed_{false};
+  std::atomic<bool> close_requested_{false};
+  CloseCallback close_cb_;
   std::thread thread_;
 };
 
