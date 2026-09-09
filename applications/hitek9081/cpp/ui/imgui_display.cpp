@@ -455,16 +455,6 @@ void ImGuiDisplay::render_waterfall_plot(int antenna, float width, float height)
 }
 
 void ImGuiDisplay::render_ddc_window_content() {
-  // Exit Application Button
-  ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.70f, 0.15f, 0.15f, 1.0f));
-  ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.85f, 0.20f, 0.20f, 1.0f));
-  ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.55f, 0.10f, 0.10f, 1.0f));
-  if (ImGui::Button("Exit Application", ImVec2(-1, 26))) {
-    close_requested_.store(true);
-  }
-  ImGui::PopStyleColor(3);
-  ImGui::Spacing();
-
   ImVec2 avail = ImGui::GetContentRegionAvail();
   float table_height = selected_ddc_ >= 0 ? avail.y * 0.45f : avail.y;
 

@@ -51,7 +51,7 @@ ninja -C build/hitek9081
 
 # 3. Run the application (inside container)
 ./build/hitek9081/applications/hitek9081/cpp/hitek9081 \
-  applications/hitek9081/hitek9081.yaml \
+  /workspace/holohub/applications/hitek9081/hitek9081.yaml \
   --sr 491.52 --center-freq 750
 ```
 
@@ -113,6 +113,7 @@ The application uses deep learning for real-time Automatic Modulation Classifica
 
 ```bash
 # Train on workstation (see scripts/README.md)
+cd /workspace/holohub/applications/hitek9081
 python scripts/train_amc_raw-iq.py --epochs 200 --batch-size 256 \
     --backbone convnext1d --samples-per-class 2500 \
     --output models/amc_raw_iq_convnext_2500.onnx
@@ -133,8 +134,8 @@ The C++ inference engine in [`amc_inference.h`](cpp/dsp/amc_inference.h) loads t
 
 `hitek9081.yaml`:
 
-| Parameter                   | Description                                                             |
-| --------------------------- | ----------------------------------------------------------------------- |
+| Parameter                   | Description                                                               |
+| --------------------------- | ------------------------------------------------------------------------- |
 | `hsb.hololink_ip`           | FPGA data-plane IP                                                      |
 | `hsb.payload_size`          | RoCE data packet payload (3968 B = 31 pages * 128 B, 992 IQ samples)   |
 | `hsb.packets_per_frame`     | Data packets per metadata packet (default: 1000, up to 100000:1)        |
@@ -154,7 +155,7 @@ Run inside the container shell:
 
 ```bash
 ./build/hitek9081/applications/hitek9081/cpp/hitek9081 \
-  applications/hitek9081/hitek9081.yaml \
+  /workspace/holohub/applications/hitek9081/hitek9081.yaml \
   --sr <MHz> --center-freq <MHz> [options]
 ```
 
@@ -164,7 +165,7 @@ If running in a headless environment without an X11 server or physical display, 
 
 ```bash
 xvfb-run -a ./build/hitek9081/applications/hitek9081/cpp/hitek9081 \
-  applications/hitek9081/hitek9081.yaml \
+  /workspace/holohub/applications/hitek9081/hitek9081.yaml \
   --sr 491.52 --center-freq 750
 ```
 
@@ -188,17 +189,30 @@ xvfb-run -a ./build/hitek9081/applications/hitek9081/cpp/hitek9081 \
 ```bash
 # 4-Channel Mode @ 491.52 MSPS with 4x FFT averaging
 ./build/hitek9081/applications/hitek9081/cpp/hitek9081 \
-  applications/hitek9081/hitek9081.yaml \
+  /workspace/holohub/applications/hitek9081/hitek9081.yaml \
   --sr 491.52 --center-freq 750 --fft-size 65536 --num-averages 4
 ```
 
 ### Packet & IQ Capture (`--dump-packets`)
 
 When troubleshooting FPGA packets, headers, or RF link bringup, pass `--dump-packets`. After a 5-second stabilization delay, the RX operator captures exactly 10 packets per channel:
+
+```bash
+./build/hitek9081/applications/hitek9081/cpp/hitek9081 \
+  /workspace/holohub/applications/hitek9081/hitek9081.yaml \
+  --sr 491.52 --center-freq 750 --dump-packets
+```
+
 - **PCAP frames**: `/tmp/hitek9081_raw_pkt_dump_ant<N>.pcap` (Wireshark-compatible Ethernet frames)
 - **Raw binary IQ**: `/tmp/hitek9081_raw_iq_dump_ant<N>.bin` (interleaved raw `int16` IQ samples)
 
 Files are closed and dumping is disabled immediately after the 10th packet, preserving 100 GbE zero-copy throughput without hot-path disk I/O stalls.
+
+> [!NOTE]
+> When running inside the container, `/tmp` resides inside the container root filesystem. To inspect captured PCAPs on the host with Wireshark, copy them to the mounted workspace:
+> ```bash
+> cp /tmp/hitek9081_raw_pkt_dump_ant*.pcap /workspace/holohub/
+> ```
 
 ### Reducing Network & CPU Overhead (`packets_per_frame`)
 

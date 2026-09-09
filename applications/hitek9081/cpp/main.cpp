@@ -275,7 +275,11 @@ int main(int argc, char** argv) {
 
   std::filesystem::path config_path(argv[optind]);
   if (!config_path.is_absolute()) {
-    config_path = std::filesystem::canonical(argv[0]).parent_path() / config_path;
+    if (std::filesystem::exists(config_path)) {
+      config_path = std::filesystem::absolute(config_path);
+    } else {
+      config_path = std::filesystem::canonical(argv[0]).parent_path() / config_path;
+    }
   }
 
   // -------------------------------------------------------------------------

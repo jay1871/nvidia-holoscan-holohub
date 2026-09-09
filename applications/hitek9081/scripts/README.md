@@ -57,20 +57,20 @@ python scripts/train_amc_raw-iq.py     --resume models/amc_raw_iq_convnext_best.
 
 ## CLI Arguments
 
-| Flag                  | Default                     | Description                                                           |
-| --------------------- | --------------------------- | --------------------------------------------------------------------- |
-| `--epochs`            | `250`                       | Total epoch target                                                    |
-| `--batch-size`        | `128`                       | Batch size (128-256 recommended for GPU)                              |
-| `--lr`                | `1e-3`                      | Initial learning rate (AdamW + ReduceLROnPlateau)                     |
-| `--workers`           | `max cores - 2`             | DataLoader worker processes (e.g., 18 on 20-core host)                 |
-| `--input-length`      | `4096`                      | Number of complex IQ samples per signal (matches DDC output buffer)  |
-| `--backbone`          | `convnext1d`                | Model architecture: `convnext1d` or `resnet1d`                        |
-| `--samples-per-class` | `2000`                      | Dynamic training samples synthesized per class per epoch              |
-| `--snr-min`           | `-5.0`                      | Minimum SNR in dB                                                     |
-| `--snr-max`           | `30.0`                      | Maximum SNR in dB                                                     |
-| `--checkpoint`        | `models/amc_raw_iq_best.pt` | Path to save best model checkpoint                                    |
-| `--resume`            | `None`                      | Checkpoint to resume training from                                    |
-| `--output`            | `models/amc_raw_iq.onnx`    | ONNX export path                                                      |
+| Flag                  | Default                     | Description                                                             |
+| --------------------- | --------------------------- | ----------------------------------------------------------------------- |
+| `--epochs`            | `250`                       | Total epoch target                                                      |
+| `--batch-size`        | `128`                       | Batch size (128-256 recommended for GPU)                                |
+| `--lr`                | `1e-3`                      | Initial learning rate (AdamW + ReduceLROnPlateau)                       |
+| `--workers`           | `max cores - 2`             | DataLoader worker processes (e.g., 18 on 20-core host)                   |
+| `--input-length`      | `4096`                      | Number of complex IQ samples per signal (matches DDC output buffer)    |
+| `--backbone`          | `convnext1d`                | Model architecture: `convnext1d` or `resnet1d`                          |
+| `--samples-per-class` | `2000`                      | Dynamic training samples synthesized per class per epoch                |
+| `--snr-min`           | `-5.0`                      | Minimum SNR in dB                                                       |
+| `--snr-max`           | `30.0`                      | Maximum SNR in dB                                                       |
+| `--checkpoint`        | `models/amc_raw_iq_best.pt` | Path to save best model checkpoint                                      |
+| `--resume`            | `None`                      | Checkpoint to resume training from                                      |
+| `--output`            | `models/amc_raw_iq.onnx`    | ONNX export path                                                        |
 
 ## Evaluation & Signal Families
 
@@ -113,7 +113,9 @@ models/amc_raw_iq.onnx                 # Standalone ONNX model (Input: [B, 2, 40
 4. Recommended application runtime parameters:
 
    ```bash
-   ./holohub run hitek9081 --fft-size 131072 --num-averages 1 --sr 491.52 --center-freq 2400
+   ./holohub run --as-root --docker-opts="--privileged" \
+     --run-args="--sr 491.52 --center-freq 2400 --fft-size 131072 --num-averages 1" \
+     hitek9081
    ```
 
    - **`--fft-size 131072` (128k) or `262144` (256k)**: Delivers continuous, non-tiled 4096-sample captures for wideband signals (such as 20 MHz Wi-Fi 802.11a and LTE) at fs = 491.52 MSPS.
