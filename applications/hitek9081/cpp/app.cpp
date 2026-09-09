@@ -57,6 +57,7 @@ void App::compose() {
       Arg("iq_format", cfg_.iq_format),
       Arg("data_port", cfg_.data_port),
       Arg("batch_size", static_cast<uint32_t>(cfg_.batch_size)),
+      Arg("dump_packets", cfg_.dump_packets),
       this->is_alive);
 
   // Compute display bin range from frequency zoom settings

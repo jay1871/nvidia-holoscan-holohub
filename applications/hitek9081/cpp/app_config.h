@@ -39,6 +39,7 @@ struct AppConfig {
   bool use_imgui = false;
 #endif
   bool waterfall = false;
+  bool dump_packets = false;
 
   // Computed from hsb config
   uint16_t max_packet_size = 1482;

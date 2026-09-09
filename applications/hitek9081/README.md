@@ -183,6 +183,7 @@ xvfb-run -a ./build/hitek9081/applications/hitek9081/cpp/hitek9081 \
 | `--imgui`               | ImGui display                                    | Default   |
 | `--holoviz`             | Use Holoviz renderer instead of ImGui            | None      |
 | `--waterfall`           | Scrolling waterfall display (implies `--imgui`)  | line plot |
+| `--dump-packets`        | Dump 10 packets to PCAP and raw binary (after 5s)| disabled  |
 
 ```bash
 # 4-Channel Mode @ 491.52 MSPS with 4x FFT averaging
@@ -190,6 +191,14 @@ xvfb-run -a ./build/hitek9081/applications/hitek9081/cpp/hitek9081 \
   applications/hitek9081/hitek9081.yaml \
   --sr 491.52 --center-freq 750 --fft-size 65536 --num-averages 4
 ```
+
+### Packet & IQ Capture (`--dump-packets`)
+
+When troubleshooting FPGA packets, headers, or RF link bringup, pass `--dump-packets`. After a 5-second stabilization delay, the RX operator captures exactly 10 packets per channel:
+- **PCAP frames**: `/tmp/hitek9081_raw_pkt_dump_ant<N>.pcap` (Wireshark-compatible Ethernet frames)
+- **Raw binary IQ**: `/tmp/hitek9081_raw_iq_dump_ant<N>.bin` (interleaved raw `int16` IQ samples)
+
+Files are closed and dumping is disabled immediately after the 10th packet, preserving 100 GbE zero-copy throughput without hot-path disk I/O stalls.
 
 ### Reducing Network & CPU Overhead (`packets_per_frame`)
 

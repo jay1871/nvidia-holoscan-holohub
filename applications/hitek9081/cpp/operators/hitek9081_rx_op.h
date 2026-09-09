@@ -79,9 +79,7 @@ class Hitek9081RxOp : public Operator {
   void process_batch();
   void accumulate_batch(int batch_idx);
   void emit_iq(int src_buf, OutputContext& op_output);
-#ifdef HITEK_ENABLE_RAW_DUMP
   void dump_raw_samples(const uint8_t* pkt_ptr, int pkt_len, int ant);
-#endif
   void freeResources();
 
   // RX state
@@ -107,8 +105,11 @@ class Hitek9081RxOp : public Operator {
   int psn_log_count_ = 0;
   int64_t ttl_psn_gaps_ = 0;
   int64_t ttl_psn_gaps_ant_[MAX_ANTENNAS] = {};
-#ifdef HITEK_ENABLE_RAW_DUMP
-  int raw_dump_samples_[MAX_ANTENNAS] = {};
+
+  // Packet & raw binary dumping state (--dump-packets)
+  static constexpr int DUMP_PACKET_COUNT = 10;
+  bool cached_dump_packets_ = false;
+  int raw_dump_pkts_[MAX_ANTENNAS] = {};
   FILE* raw_dump_file_[MAX_ANTENNAS] = {};
   FILE* raw_dump_pkt_file_[MAX_ANTENNAS] = {};
   std::chrono::steady_clock::time_point dump_start_;
@@ -117,7 +118,6 @@ class Hitek9081RxOp : public Operator {
   bool dump_done_ = false;
   bool dump_ant_seen_[MAX_ANTENNAS] = {};
   int dump_ant_seen_count_ = 0;
-#endif
   uint16_t nom_payload_size_ = 0;
   int payload_drop_log_count_ = 0;
   std::array<cudaEvent_t, num_concurrent> rx_events_{};
@@ -150,6 +150,7 @@ class Hitek9081RxOp : public Operator {
   Parameter<int> iq_format_;
   Parameter<uint32_t> data_port_;
   Parameter<int> rx_core_;
+  Parameter<bool> dump_packets_;
 
   bool thread_pinned_ = false;
   int64_t ttl_psn_ooo_ant_[MAX_ANTENNAS] = {};

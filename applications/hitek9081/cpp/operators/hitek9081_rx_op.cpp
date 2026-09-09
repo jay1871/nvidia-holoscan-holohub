@@ -56,12 +56,16 @@ Hitek9081RxOp::~Hitek9081RxOp() {
                     ttl_data_frames_, ttl_payload_bytes_,
                     ttl_packets_dropped_, ttl_metadata_pkts_,
                     ttl_psn_gaps_);
-#ifdef HITEK_ENABLE_RAW_DUMP
   for (int a = 0; a < MAX_ANTENNAS; a++) {
-    if (raw_dump_file_[a]) fclose(raw_dump_file_[a]);
-    if (raw_dump_pkt_file_[a]) fclose(raw_dump_pkt_file_[a]);
+    if (raw_dump_file_[a]) {
+      fclose(raw_dump_file_[a]);
+      raw_dump_file_[a] = nullptr;
+    }
+    if (raw_dump_pkt_file_[a]) {
+      fclose(raw_dump_pkt_file_[a]);
+      raw_dump_pkt_file_[a] = nullptr;
+    }
   }
-#endif
   drain_batch_queue();
   freeResources();
 }
@@ -92,6 +96,8 @@ void Hitek9081RxOp::setup(OperatorSpec& spec) {
                        "Base UDP dst port for channel 0", 4096);
   spec.param<int>(rx_core_, "rx_core", "RX CPU Core",
                   "CPU core to pin RX compute thread to (-1 to disable)", 18);
+  spec.param<bool>(dump_packets_, "dump_packets", "Dump packets",
+                   "Dump 10 packets to PCAP and raw binary after 5 seconds", false);
 }
 
 void Hitek9081RxOp::initialize() {
@@ -142,6 +148,7 @@ void Hitek9081RxOp::initialize() {
   cached_samples_per_ant_ = samples_per_antenna_.get();
   cached_iq_format_ = iq_format_.get();
   cached_batch_size_ = batch_size_.get();
+  cached_dump_packets_ = dump_packets_.get();
 
   for (int a = 0; a < MAX_ANTENNAS; a++) {
     last_psn_[a] = 0;
@@ -182,9 +189,7 @@ void Hitek9081RxOp::compute(InputContext&, OutputContext& op_output, ExecutionCo
   const uint16_t hdr_size = header_size_.get();
   const int base_port = static_cast<int>(data_port_.get());
   const int batch_sz = batch_size_.get();
-#ifdef HITEK_ENABLE_RAW_DUMP
-  const bool dumping = !dump_ready_ || (dump_ready_ && !dump_done_);
-#endif
+  const bool dumping = cached_dump_packets_ && (!dump_ready_ || (dump_ready_ && !dump_done_));
 
   BurstParams* burst;
   const auto num_rx_queues = get_num_rx_queues(port_id_);
@@ -244,9 +249,7 @@ void Hitek9081RxOp::compute(InputContext&, OutputContext& op_output, ExecutionCo
           continue;
         }
 
-#ifdef HITEK_ENABLE_RAW_DUMP
         if (dumping) dump_raw_samples(pkt_ptr, pkt_len, ant_id);
-#endif
 
         h_ant_ptrs_[cur_batch_idx_][ant_id][batch_ant_pkt_count_[ant_id]++] = pkt_ptr + hdr_size;
 
@@ -497,26 +500,11 @@ void Hitek9081RxOp::emit_iq(int src_buf, OutputContext& op_output) {
   op_output.emit(out_msg, "iq_out");
 }
 
-#ifdef HITEK_ENABLE_RAW_DUMP
 void Hitek9081RxOp::dump_raw_samples(const uint8_t* pkt_ptr, int pkt_len, int ant) {
   if (dump_done_) return;
   if (ant < 0 || ant >= cached_num_antennas_) return;
-  if (raw_dump_samples_[ant] >= cached_fft_size_) {
-    bool all_done = true;
-    for (int a = 0; a < cached_num_antennas_; a++) {
-      if (dump_ant_seen_[a] && raw_dump_samples_[a] < cached_fft_size_) {
-        all_done = false;
-        break;
-      }
-    }
-    if (all_done && dump_ant_seen_count_ > 0) dump_done_ = true;
-    return;
-  }
-  if (!dump_ant_seen_[ant]) {
-    dump_ant_seen_[ant] = true;
-    dump_ant_seen_count_++;
-  }
 
+  // 5-second delay for DPDK/JESD link stabilization
   if (!dump_start_set_) {
     dump_start_ = std::chrono::steady_clock::now();
     dump_start_set_ = true;
@@ -524,19 +512,26 @@ void Hitek9081RxOp::dump_raw_samples(const uint8_t* pkt_ptr, int pkt_len, int an
   if (!dump_ready_) {
     if (std::chrono::steady_clock::now() - dump_start_ < std::chrono::seconds(5)) return;
     dump_ready_ = true;
-    HOLOSCAN_LOG_INFO("=== Dump delay elapsed -- capturing steady-state data ===");
+    HOLOSCAN_LOG_INFO("=== Dump delay elapsed (5s) -- capturing {} packets of steady-state data ===",
+                      DUMP_PACKET_COUNT);
+  }
+
+  if (raw_dump_pkts_[ant] >= DUMP_PACKET_COUNT) return;
+
+  if (!dump_ant_seen_[ant]) {
+    dump_ant_seen_[ant] = true;
+    dump_ant_seen_count_++;
   }
 
   int num_samp = cached_samples_per_ant_;
   const int16_t* samples = reinterpret_cast<const int16_t*>(pkt_ptr + header_size_.get());
-  const int fft_n = cached_fft_size_;
 
   if (!raw_dump_file_[ant]) {
     char path[128];
     snprintf(path, sizeof(path), "/tmp/hitek9081_raw_iq_dump_ant%d.bin", ant);
     raw_dump_file_[ant] = fopen(path, "wb");
     if (raw_dump_file_[ant])
-      HOLOSCAN_LOG_INFO("=== Dumping {} samples to {} ===", fft_n, path);
+      HOLOSCAN_LOG_INFO("=== Dumping raw IQ to {} ===", path);
   }
   if (!raw_dump_pkt_file_[ant]) {
     char path[128];
@@ -549,18 +544,12 @@ void Hitek9081RxOp::dump_raw_samples(const uint8_t* pkt_ptr, int pkt_len, int an
       HOLOSCAN_LOG_INFO("=== Dumping full packets to {} ===", path);
     }
   }
+
   if (raw_dump_file_[ant]) {
-    int to_write = std::min(num_samp, fft_n - raw_dump_samples_[ant]);
-    fwrite(samples, sizeof(int16_t), to_write * 2, raw_dump_file_[ant]);
+    fwrite(samples, sizeof(int16_t), num_samp * 2, raw_dump_file_[ant]);
     fflush(raw_dump_file_[ant]);
-    raw_dump_samples_[ant] += to_write;
-    if (raw_dump_samples_[ant] >= fft_n) {
-      fclose(raw_dump_file_[ant]);
-      raw_dump_file_[ant] = nullptr;
-      HOLOSCAN_LOG_INFO("=== Raw IQ dump ant{} complete: {} complex samples ===",
-                        ant, raw_dump_samples_[ant]);
-    }
   }
+
   if (raw_dump_pkt_file_[ant]) {
     struct timespec ts;
     clock_gettime(CLOCK_REALTIME, &ts);
@@ -572,14 +561,36 @@ void Hitek9081RxOp::dump_raw_samples(const uint8_t* pkt_ptr, int pkt_len, int an
     fwrite(&phdr, sizeof(phdr), 1, raw_dump_pkt_file_[ant]);
     fwrite(pkt_ptr, 1, pkt_len, raw_dump_pkt_file_[ant]);
     fflush(raw_dump_pkt_file_[ant]);
-    if (raw_dump_samples_[ant] >= fft_n) {
+  }
+
+  raw_dump_pkts_[ant]++;
+  if (raw_dump_pkts_[ant] >= DUMP_PACKET_COUNT) {
+    if (raw_dump_file_[ant]) {
+      fclose(raw_dump_file_[ant]);
+      raw_dump_file_[ant] = nullptr;
+      HOLOSCAN_LOG_INFO("=== Raw IQ dump ant{} complete: {} packets ({} complex samples) ===",
+                        ant, DUMP_PACKET_COUNT, DUMP_PACKET_COUNT * num_samp);
+    }
+    if (raw_dump_pkt_file_[ant]) {
       fclose(raw_dump_pkt_file_[ant]);
       raw_dump_pkt_file_[ant] = nullptr;
-      HOLOSCAN_LOG_INFO("=== Full packet dump ant{} complete ===", ant);
+      HOLOSCAN_LOG_INFO("=== Full packet dump ant{} complete: {} packets ===",
+                        ant, DUMP_PACKET_COUNT);
+    }
+
+    bool all_done = true;
+    for (int a = 0; a < cached_num_antennas_; a++) {
+      if (dump_ant_seen_[a] && raw_dump_pkts_[a] < DUMP_PACKET_COUNT) {
+        all_done = false;
+        break;
+      }
+    }
+    if (all_done && dump_ant_seen_count_ > 0) {
+      dump_done_ = true;
+      HOLOSCAN_LOG_INFO("=== All antenna dumps complete ({} packets each) ===", DUMP_PACKET_COUNT);
     }
   }
 }
-#endif
 
 void Hitek9081RxOp::freeResources() {
   for (int n = 0; n < num_concurrent; n++) {

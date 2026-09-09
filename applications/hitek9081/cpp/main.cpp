@@ -103,6 +103,7 @@ void print_usage(const char* prog)
               << "  --imgui             Use ImGui/ImPlot GUI (default when built with ImGui)\n"
               << "  --holoviz           Use Holoviz renderer instead of ImGui\n"
               << "  --waterfall         Enable waterfall display in ImGui\n"
+              << "  --dump-packets      Dump 10 packets to PCAP and raw binary after 5 seconds\n"
               << "  -h, --help          Show this help\n";
 }
 
@@ -140,6 +141,7 @@ int main(int argc, char** argv) {
       {"no-imgui", no_argument, nullptr, 0},
       {"holoviz", no_argument, nullptr, 0},
       {"waterfall", no_argument, nullptr, 0},
+      {"dump-packets", no_argument, nullptr, 0},
       {0, 0, nullptr, 0}};
 
   while (true) {
@@ -175,6 +177,8 @@ int main(int argc, char** argv) {
       } else if (name == "waterfall") {
         cfg.waterfall = true;
         cfg.use_imgui = true;
+      } else if (name == "dump-packets") {
+        cfg.dump_packets = true;
       }
     } else if (c == 'h') {
       print_usage(argv[0]);
