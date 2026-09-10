@@ -47,12 +47,39 @@ python scripts/train_amc_raw-iq.py     --epochs 250     --batch-size 128     --b
 python scripts/train_amc_raw-iq.py     --epochs 250     --batch-size 128     --backbone resnet1d     --samples-per-class 2000     --snr-min -5.0     --snr-max 30.0     --checkpoint models/amc_raw_iq_resnet_best.pt     --output models/amc_raw_iq_resnet.onnx
 ```
 
-### 3. Resuming Training
+### 3. Resuming & Fine-Tuning
 
-`--epochs` specifies the **total** target epoch count:
+- **Extending Epochs**: Continue training towards a new total `--epochs` target using the decayed checkpoint learning rate:
+
+  ```bash
+  python scripts/train_amc_raw-iq.py \
+      --resume models/amc_raw_iq_convnext_best.pt \
+      --epochs 500 \
+      --backbone convnext1d \
+      --output models/amc_raw_iq_convnext.onnx
+  ```
+
+- **Fine-Tuning (`--override-lr`)**: Resets early stopping counters and overrides the learning rate with `--lr` to explore a new distribution or SNR range:
+
+  ```bash
+  python scripts/train_amc_raw-iq.py \
+      --resume models/amc_raw_iq_convnext_best.pt \
+      --override-lr --lr 1e-5 \
+      --epochs 550 \
+      --output models/amc_raw_iq_convnext_finetuned.onnx
+  ```
+
+  > [!TIP]
+  > When resuming, keep `--samples-per-class` and `--batch-size` matched to the previous run to avoid distribution shift and optimizer gradient mismatch.
+
+### 4. Standalone ONNX Export (Without Training)
+
+Export any existing PyTorch checkpoint directly to an ONNX model:
 
 ```bash
-python scripts/train_amc_raw-iq.py     --resume models/amc_raw_iq_convnext_best.pt     --epochs 500     --backbone convnext1d     --output models/amc_raw_iq_convnext.onnx
+python scripts/train_amc_raw-iq.py \
+    --export models/amc_raw_iq_convnext_best.pt \
+    --output models/amc_raw_iq_convnext_best.onnx
 ```
 
 ## CLI Arguments
@@ -68,8 +95,10 @@ python scripts/train_amc_raw-iq.py     --resume models/amc_raw_iq_convnext_best.
 | `--samples-per-class` | `2000`                      | Dynamic training samples synthesized per class per epoch                |
 | `--snr-min`           | `-5.0`                      | Minimum SNR in dB                                                       |
 | `--snr-max`           | `30.0`                      | Maximum SNR in dB                                                       |
+| `--override-lr`       | `False`                     | When resuming, override optimizer LR with `--lr` and reset early stop   |
 | `--checkpoint`        | `models/amc_raw_iq_best.pt` | Path to save best model checkpoint                                      |
 | `--resume`            | `None`                      | Checkpoint to resume training from                                      |
+| `--export`            | `None`                      | Export an existing checkpoint directly to ONNX without training         |
 | `--output`            | `models/amc_raw_iq.onnx`    | ONNX export path                                                        |
 
 ## Evaluation & Signal Families
@@ -78,6 +107,10 @@ The training script automatically logs both fine-grained modulation accuracy and
 
 - **14 Families**: OOK, ASK, FSK, PSK, QAM, OFDM, FM, AM, CHIRP, TONE, SPREAD, TDMA, SAT, BURST.
 - **Family Accuracy Calculation**: Evaluates the sum of subclass probabilities belonging to each family, aligning with the real-time C++ inference engine in [`cpp/dsp/amc_inference.h`](../cpp/dsp/amc_inference.h).
+- **Empirical Benchmarks (Full 69 Classes, -5 dB to +30 dB SNR)**:
+  - **Top-1 Class Accuracy**: **55.9%**
+  - **Top-1 Family Accuracy**: **77.3%**
+  - **Key Protocols**: DVB-S2 **0.960**, AM-USB **0.968**, 16FSK **0.991**, 32PSK **0.967**, 802.11a (Wi-Fi) **0.940**, Zigbee **0.921**, GSM **0.904**, Bluetooth LE **0.898**, LoRa **0.890**, P25 **0.840**, DMR **0.816**, LFM-Radar **0.816**.
 - **Macro F1**: Unweighted mean of per-class F1 scores across all classes.
 - **Per-Class Report**: Printed on training completion showing individual precision/recall/F1 for every modulation.
 

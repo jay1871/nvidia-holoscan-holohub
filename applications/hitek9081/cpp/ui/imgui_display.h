@@ -44,8 +44,8 @@ class ImGuiDisplay {
   void render_ddc_window_content();
   void render_ddc_table();
   void render_ddc_detail(int slot);
-  void render_line_plot(int antenna, float width, float height);
-  void render_waterfall_plot(int antenna, float width, float height);
+  void render_line_plot(int antenna, float width, float height, bool compact = false);
+  void render_waterfall_plot(int antenna, float width, float height, bool has_title = true);
   void handle_selection(int antenna, double center_freq);
   void update_slot_zoom(int slot);
 

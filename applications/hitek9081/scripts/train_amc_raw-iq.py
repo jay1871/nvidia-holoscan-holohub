@@ -686,18 +686,11 @@ def train(args: argparse.Namespace) -> None:
             if args.override_lr:
                 scheduler.best = float("inf")
                 scheduler.num_bad_epochs = 0
-        if args.override_lr:
-            best_acc = 0.0
-            best_fam_acc = 0.0
-            best_val_loss = float("inf")
-            early_stop_counter = 0
-            log.info("  Fine-tuning mode: reset baseline best_val_loss and best_acc for new distribution")
-        else:
-            best_acc = ckpt.get("best_acc", 0.0)
-            best_fam_acc = ckpt.get("best_fam_acc", 0.0)
-            best_val_loss = ckpt.get("best_val_loss", float("inf"))
-            early_stop_counter = ckpt.get("early_stop_counter", 0)
-        if "history" in ckpt and not args.override_lr:
+        best_acc = ckpt.get("best_acc", 0.0)
+        best_fam_acc = ckpt.get("best_fam_acc", 0.0)
+        best_val_loss = ckpt.get("best_val_loss", float("inf"))
+        early_stop_counter = 0  # reset early stop counter for new training session
+        if "history" in ckpt:
             history = ckpt["history"]
 
     all_preds: list[int] = []
@@ -871,21 +864,36 @@ def train(args: argparse.Namespace) -> None:
     plot_training_history(history, plot_path)
 
     # Export ONNX model for TensorRT deployment
-    log.info("Exporting ONNX model to %s...", args.output)
-    ckpt_data = torch.load(args.checkpoint, map_location=device)
+    export_onnx_model(args.checkpoint, args.output, args.backbone, args.input_length, device)
+
+
+def export_onnx_model(
+    checkpoint_path: str,
+    output_path: str,
+    backbone: str,
+    input_length: int,
+    device: torch.device,
+) -> None:
+    """Export trained model checkpoint to a standalone ONNX model."""
+    log.info("Exporting ONNX model from %s to %s...", checkpoint_path, output_path)
+    ckpt_data = torch.load(checkpoint_path, map_location=device)
+    if isinstance(ckpt_data, dict):
+        backbone = ckpt_data.get("backbone", backbone)
+        input_length = ckpt_data.get("input_length", input_length)
+    model = create_model(backbone, num_classes=NUM_CLASSES).to(device)
     if isinstance(ckpt_data, dict) and "model_state" in ckpt_data:
         model.load_state_dict(ckpt_data["model_state"])
     else:
         model.load_state_dict(ckpt_data)
 
     model.eval()
-    dummy = torch.randn(1, 2, args.input_length).to(device)
-    Path(args.output).parent.mkdir(parents=True, exist_ok=True)
+    dummy = torch.randn(1, 2, input_length).to(device)
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
 
     torch.onnx.export(
         model.cpu(),
         dummy.cpu(),
-        args.output,
+        output_path,
         input_names=["iq"],
         output_names=["class_probs"],
         dynamic_axes={"iq": {0: "batch"}, "class_probs": {0: "batch"}},
@@ -896,17 +904,18 @@ def train(args: argparse.Namespace) -> None:
     try:
         import onnx
 
-        m = onnx.load(args.output)
-        onnx.save(m, args.output, save_as_external_data=False)
+        m = onnx.load(output_path)
+        onnx.save(m, output_path, save_as_external_data=False)
     except (ImportError, OSError, ValueError) as err:
         log.debug("ONNX external data consolidation skipped: %s", err)
 
-    size_mb = Path(args.output).stat().st_size / (1024 * 1024)
+    size_mb = Path(output_path).stat().st_size / (1024 * 1024)
     log.info(
-        "ONNX exported: %s (%.1f MB, input [B, 2, %d])",
-        args.output,
+        "ONNX exported: %s (%.1f MB, backbone: %s, input [B, 2, %d])",
+        output_path,
         size_mb,
-        args.input_length,
+        backbone,
+        input_length,
     )
 
 
@@ -1004,7 +1013,18 @@ def main() -> None:
         default="models/amc_raw_iq.onnx",
         help="Path to export final ONNX model",
     )
+    parser.add_argument(
+        "--export",
+        metavar="CHECKPOINT",
+        default=None,
+        help="Export an existing checkpoint (.pt) directly to ONNX without training",
+    )
     args = parser.parse_args()
+
+    if args.export:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        export_onnx_model(args.export, args.output, args.backbone, args.input_length, device)
+        return
 
     train(args)
 

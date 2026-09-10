@@ -216,14 +216,30 @@ void ImGuiDisplay::render_loop() {
 }
 
 void ImGuiDisplay::render_main_panel() {
+  if (cur_read_idx_ < 0) return;
+
   ImVec2 avail = ImGui::GetContentRegionAvail();
   float plot_height = avail.y / cfg_.num_antennas;
 
+  static float row_ratios[4][2] = {
+    {0.22f, 0.78f},
+    {0.22f, 0.78f},
+    {0.22f, 0.78f},
+    {0.22f, 0.78f}
+  };
+
   for (int a = 0; a < cfg_.num_antennas; a++) {
-    if (cfg_.waterfall_mode) {
-      render_waterfall_plot(a, avail.x, plot_height);
+    if (cfg_.waterfall_mode && wf_tex_initialized_) {
+      char sub_id[32];
+      snprintf(sub_id, sizeof(sub_id), "##wf_sub_%d", a);
+      ImPlotSubplotFlags sub_flags = ImPlotSubplotFlags_NoTitle | ImPlotSubplotFlags_LinkCols;
+      if (ImPlot::BeginSubplots(sub_id, 2, 1, ImVec2(avail.x, plot_height), sub_flags, row_ratios[a % 4])) {
+        render_line_plot(a, avail.x, 0, /*compact=*/true);
+        render_waterfall_plot(a, avail.x, 0, /*has_title=*/false);
+        ImPlot::EndSubplots();
+      }
     } else {
-      render_line_plot(a, avail.x, plot_height);
+      render_line_plot(a, avail.x, plot_height, /*compact=*/false);
     }
   }
 }
@@ -272,7 +288,7 @@ void ImGuiDisplay::update_slot_zoom(int s) {
   slot.bin_end = std::min(cfg_.num_bins, (int)((slot.freq_max_mhz - cfg_.freq_min_mhz) / freq_step) + 1);
 }
 
-void ImGuiDisplay::render_line_plot(int antenna, float width, float height) {
+void ImGuiDisplay::render_line_plot(int antenna, float width, float height, bool compact) {
   if (cur_read_idx_ < 0) return;
 
   const auto& frame = buffers_[cur_read_idx_];
@@ -290,7 +306,12 @@ void ImGuiDisplay::render_line_plot(int antenna, float width, float height) {
   ImPlot::PushStyleColor(ImPlotCol_Line, colors[antenna % 4]);
 
   if (ImPlot::BeginPlot(label, ImVec2(width, height), ImPlotFlags_NoLegend | ImPlotFlags_NoBoxSelect)) {
-    ImPlot::SetupAxes("Frequency (MHz)", "dBFS");
+    if (compact) {
+      ImPlot::SetupAxes(nullptr, "dBFS");
+      ImPlot::SetupAxis(ImAxis_X1, nullptr, ImPlotAxisFlags_NoLabel | ImPlotAxisFlags_NoTickLabels);
+    } else {
+      ImPlot::SetupAxes("Frequency (MHz)", "dBFS");
+    }
     ImPlot::SetupAxisLimits(ImAxis_X1, cfg_.freq_min_mhz, cfg_.freq_max_mhz, ImPlotCond_Always);
     ImPlot::SetupAxisLimits(ImAxis_Y1, cfg_.db_min, cfg_.db_max, ImPlotCond_Always);
 
@@ -367,7 +388,7 @@ void ImGuiDisplay::destroy_waterfall_textures() {
   }
 }
 
-void ImGuiDisplay::render_waterfall_plot(int antenna, float width, float height) {
+void ImGuiDisplay::render_waterfall_plot(int antenna, float width, float height, bool has_title) {
   if (cur_read_idx_ < 0 || !wf_tex_initialized_) return;
 
   // Append to waterfall only when new data arrives, track timing
@@ -406,7 +427,12 @@ void ImGuiDisplay::render_waterfall_plot(int antenna, float width, float height)
   char label[64];
   snprintf(label, sizeof(label), "Antenna %d Waterfall##wf%d", antenna, antenna);
 
-  if (ImPlot::BeginPlot(label, ImVec2(width, height), ImPlotFlags_NoLegend | ImPlotFlags_NoBoxSelect)) {
+  ImPlotFlags flags = ImPlotFlags_NoLegend | ImPlotFlags_NoBoxSelect;
+  if (!has_title) {
+    flags |= ImPlotFlags_NoTitle;
+  }
+
+  if (ImPlot::BeginPlot(label, ImVec2(width, height), flags)) {
     double actual_span = (waterfall_frame_time_ > 0)
         ? waterfall_frame_time_ * cfg_.waterfall_history
         : cfg_.waterfall_time_span;
