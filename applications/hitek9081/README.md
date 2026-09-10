@@ -3,8 +3,8 @@
 Real-time wideband spectrum analysis with CUDA DDC and TensorRT modulation classification.
 
 ```text
-Hitek9081RxOp ----> SpectralOp ----> HolovizOp / ImGuiSinkOp
-(DPDK zero-copy       | (FFT, avg,      (line plot / waterfall)
+Hitek9081RxOp ----> SpectralOp ----> ImGuiSinkOp
+(ibverbs zero-copy    | (FFT, avg,      (panadapter + waterfall)
  scatter-gather)      |  magnitude)
                       +----> DDCChannel[0..15] ----> TensorRT AMC ----> ImGui DDC Panel
 ```
@@ -12,9 +12,9 @@ Hitek9081RxOp ----> SpectralOp ----> HolovizOp / ImGuiSinkOp
 ## Requirements
 
 - DGX Spark (GB10, sm_121) or Hopper/Blackwell GPU with unified memory
-- HSB FPGA via ConnectX NIC, hugepages, NIC bound to DPDK
+- HSB FPGA via ConnectX-7 NIC with ibverbs (DevX MPRQ)
 - Isolated CPU cores: `isolcpus=16-19` in kernel cmdline
-- Display: X11 display (for live ImGui/Holoviz GUI) or built-in virtual framebuffer (`xvfb`) for headless operation
+- Display: X11 display (for live ImGui GUI) or built-in virtual framebuffer (`xvfb`) for headless operation
 
 ## Container Setup
 
@@ -136,18 +136,18 @@ The C++ inference engine in [`amc_inference.h`](cpp/dsp/amc_inference.h) loads t
 
 | Parameter                   | Description                                                               |
 | --------------------------- | ------------------------------------------------------------------------- |
-| `hsb.hololink_ip`           | FPGA data-plane IP                                                      |
-| `hsb.payload_size`          | RoCE data packet payload (3968 B = 31 pages * 128 B, 992 IQ samples)   |
-| `hsb.packets_per_frame`     | Data packets per metadata packet (default: 1000, up to 100000:1)        |
-| `hsb.mtu`                   | Max RoCE payload (>= payload_size, max 4096)                            |
-| `hsb.data_port`             | UDP dst port (match flow rule; ant0=4096, ant1=4097, etc.)              |
-| `hitek9081_rx.batch_size`   | Packets per batch (default: 20480, tuned for 100 GbE line rate)         |
-| `hitek9081_rx.num_antennas` | Number of ADC channels (1, 2, or 4)                                     |
-| `hitek9081_rx.iq_format`    | 0=pair-interleaved, 1=block-4                                           |
-| `spectral.iq_swap`          | 0=as-is, 1=swap (JESD lanes), 2=conjugate (upper sideband)              |
-| `spectral.adc_bits`         | ADC resolution (e.g., 16)                                               |
-| `spectral.amc_model_path`   | ONNX path (empty = AMC disabled)                                        |
-| `spectral.db_min/db_max`    | Display dBFS range                                                      |
+| `hsb.hololink_ip`           | FPGA data-plane IP                                                        |
+| `hsb.payload_size`          | RoCE data packet payload (3968 B = 31 pages * 128 B, 992 IQ samples)      |
+| `hsb.packets_per_frame`     | Data packets per metadata packet (default: 1000, up to 100000:1)          |
+| `hsb.mtu`                   | Max RoCE payload (>= payload_size, max 4096)                              |
+| `hsb.data_port`             | UDP dst port (match flow rule; ant0=4096, ant1=4097, etc.)                |
+| `hitek9081_rx.batch_size`   | Packets per batch (default: 20480, tuned for 100 GbE line rate)           |
+| `hitek9081_rx.num_antennas` | Number of ADC channels (1, 2, or 4)                                       |
+| `hitek9081_rx.iq_format`    | 0=pair-interleaved, 1=block-4                                             |
+| `spectral.iq_swap`          | 0=as-is, 1=swap (JESD lanes), 2=conjugate (upper sideband)                |
+| `spectral.adc_bits`         | ADC resolution (e.g., 16)                                                 |
+| `spectral.amc_model_path`   | ONNX path (empty = AMC disabled)                                          |
+| `spectral.db_min/db_max`    | Display dBFS range                                                        |
 
 ## Execution Options
 
@@ -180,10 +180,7 @@ xvfb-run -a ./build/hitek9081/applications/hitek9081/cpp/hitek9081 \
 | `--batch-size N`        | RX aggregation burst size                        | YAML      |
 | `--packets-per-frame N` | Data packets per metadata packet                 | YAML      |
 | `--freq-min/max MHz`    | Display frequency range                          | full band |
-| `--hololink IP`         | Override FPGA IP                                 | YAML      |
-| `--imgui`               | ImGui display                                    | Default   |
-| `--holoviz`             | Use Holoviz renderer instead of ImGui            | None      |
-| `--waterfall`           | Scrolling waterfall display (implies `--imgui`)  | line plot |
+| `--waterfall`           | Scrolling waterfall display                      | line plot |
 | `--dump-packets`        | Dump 10 packets to PCAP and raw binary (after 5s)| disabled  |
 
 ```bash
@@ -210,6 +207,7 @@ Files are closed and dumping is disabled immediately after the 10th packet, pres
 
 > [!NOTE]
 > When running inside the container, `/tmp` resides inside the container root filesystem. To inspect captured PCAPs on the host with Wireshark, copy them to the mounted workspace:
+>
 > ```bash
 > cp /tmp/hitek9081_raw_pkt_dump_ant*.pcap /workspace/holohub/
 > ```
@@ -264,7 +262,7 @@ cpp/
 |   |-- hsb_device_manager.h     -- FPGA discovery, RoCE config, JESD link synchronization
 |   `-- hsb_device_manager.cpp
 |-- operators/
-|   |-- hitek9081_rx_op.h / .cpp -- Zero-copy DPDK RX operator
+|   |-- hitek9081_rx_op.h / .cpp -- Zero-copy ibverbs (MPRQ) RX operator
 |   |-- spectral_op.h / .cpp     -- Holoscan operator: DSP execution + DDC/AMC routing
 |   `-- imgui_sink_op.h / .cpp   -- GPU -> CPU bridge + DDC sync
 |-- dsp/
@@ -276,8 +274,7 @@ cpp/
 |   |-- amc_inference.h          -- TensorRT: engine cache, raw-IQ inference, family grouping
 |   `-- amc_constants.h          -- Shared constants (class/family counts)
 `-- ui/
-    |-- imgui_display.h / .cpp   -- ImGui render thread (no CUDA deps)
-    `-- holoviz_output.h         -- Holoviz: grid overlays + coordinate normalization
+    `-- imgui_display.h / .cpp   -- ImGui render thread (panadapter + waterfall + DDC/AMC UI)
 ```
 
 ## Zero-Copy RX

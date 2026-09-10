@@ -40,7 +40,7 @@ scheduler:
   stop_on_deadlock_timeout: 500
 
 # =============================================================================
-# DAQIRI DPDK Configuration
+# DAQIRI ibverbs Configuration
 # =============================================================================
 # host_pinned memory is GPU-accessible on DGX Spark (unified LPDDR5) -
 # enables zero-copy scatter-gather without GPUDirect or cudaMemcpy.
@@ -53,7 +53,7 @@ scheduler:
 #
 #   Isolated cores on DGX Spark: set via kernel cmdline `isolcpus=16-19`
 #   (4 cores available). Each queue below should use a distinct isolated
-#   core. Non-isolated cores (like master_core: 8) handle DPDK management.
+#   core. Non-isolated cores (like master_core: 8) handle management.
 #
 #   To add queues: duplicate the rx_q_0 block with a new id and cpu_core,
 #   then add a corresponding flow rule (or use RSS for automatic distribution).
@@ -62,7 +62,8 @@ daqiri:
   cfg:
     version: 1
     stream_type: "raw"
-    master_core: 8              # non-isolated core for DPDK management
+    engine: "ibverbs"
+    master_core: 8              # non-isolated core for management
     debug: false
     log_level: "info"
     loopback: ""

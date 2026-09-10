@@ -33,7 +33,7 @@ index 0c0df54..faaadcd 100644
 @@ -727,6 +728,12 @@ PYBIND11_MODULE(_hololink, m)
          .def("apply", &AD9986Config::apply)
          .def("verify_link_status", &AD9986Config::verify_link_status);
- 
+
 +    py::class_<HTK_JESD_HPS_Config, std::shared_ptr<HTK_JESD_HPS_Config>>(m, "HTK_JESD_HPS_Config")
 +        .def(py::init<Hololink&>(), "hololink"_a)
 +        .def("host_pause_mapping", &HTK_JESD_HPS_Config::host_pause_mapping, "mask"_a)
@@ -70,7 +70,7 @@ index a43bfa1..facc679 100644
 @@ -700,6 +700,24 @@ void Enumerator::configure_default_enumeration_strategies()
          microchip_polarfire_total_sensors, microchip_polarfire_total_dataplanes, microchip_polarfire_sifs_per_sensor);
      (*strategies)[MICROCHIP_POLARFIRE_UUID] = microchip_polarfire_enumeration_strategy;
- 
+
 +    Metadata htk_metadata_2ch;
 +    htk_metadata_2ch["board_description"] = "Hitek Systems AGSOM5u 2ADC-2DAC";
 +    unsigned htk_total_sensors = 4; // 2DAC & 2ADC
@@ -91,7 +91,7 @@ index a43bfa1..facc679 100644
 +
      auto leopard_eagle_enumeration_strategy = std::make_shared<LeopardEagleEnumerationStrategy>();
      (*strategies)[LEOPARD_EAGLE_UUID] = leopard_eagle_enumeration_strategy;
- 
+
 diff --git a/src/hololink/core/enumerator.hpp b/src/hololink/core/enumerator.hpp
 index b02f9de..487f0ee 100644
 --- a/src/hololink/core/enumerator.hpp
@@ -102,7 +102,7 @@ index b02f9de..487f0ee 100644
  const std::string LEOPARD_EAGLE_UUID = "f1627640-b4dc-48af-a360-c55b09b3d230";
 +const std::string HTK_UUID_AG5_2CH_BUILD = "187b51fc-1aae-425b-9af8-eafa41ef08ba";
 +const std::string HTK_UUID_AG5_4CH_BUILD = "c6d5cfce-4135-4cf8-aa89-e63b0c5815ce";
- 
+
  /**
   * Strategy that adjusts enumeration data based on FPGA UUID.
 diff --git a/src/hololink/core/htk_jesd.cpp b/src/hololink/core/htk_jesd.cpp

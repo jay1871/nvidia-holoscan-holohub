@@ -18,28 +18,19 @@
 #pragma once
 
 #include "app_config.h"
-#include <holoscan/holoscan.hpp>
-#include <holoscan/operators/holoviz/holoviz.hpp>
-#include <memory>
-#include <vector>
-
-#ifdef HAS_IMGUI
 #include "imgui_display.h"
-#endif
+#include <holoscan/holoscan.hpp>
+#include <memory>
 
 class App : public holoscan::Application {
  public:
   std::shared_ptr<holoscan::BooleanCondition> is_alive;
-#ifdef HAS_IMGUI
   std::shared_ptr<ImGuiDisplay> imgui_display_;
-#endif
 
   explicit App(const AppConfig& cfg);
   void compose() override;
 
  private:
-  std::vector<holoscan::ops::HolovizOp::InputSpec> buildGridSpecs();
-
   AppConfig cfg_;
 };
 

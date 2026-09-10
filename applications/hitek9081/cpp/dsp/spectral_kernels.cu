@@ -38,35 +38,7 @@ void generate_hanning_window(float* out, int n, cudaStream_t stream) {
 
 
 
-// ============================================================================
-// Normalize to [0,1] coordinate pairs for Holoviz line plot
-// ============================================================================
 
-__global__ void normalize_to_coords_kernel(const float* in, float* out,
-                                           int bin_start, int num_bins,
-                                           float db_min, float db_max,
-                                           int flip_x) {
-  int i = blockIdx.x * blockDim.x + threadIdx.x;
-  if (i < num_bins) {
-    float x = static_cast<float>(i) / static_cast<float>(num_bins - 1);
-    if (flip_x) x = 1.0f - x;
-    float y = (in[bin_start + i] - db_min) / (db_max - db_min);
-    y = fminf(fmaxf(y, 0.0f), 1.0f);
-    y = 1.0f - y;  // Holoviz Y: 0=top, 1=bottom -- invert so dB_max renders at top
-    out[2 * i] = x;
-    out[2 * i + 1] = y;
-  }
-}
-
-void normalize_to_coords(const float* in, float* out, int n,
-                         float db_min, float db_max,
-                         int bin_start, int bin_end,
-                         int flip_x, cudaStream_t stream) {
-  int num_bins = bin_end - bin_start;
-  int threads = 256;
-  int blocks = (num_bins + threads - 1) / threads;
-  normalize_to_coords_kernel<<<blocks, threads, 0, stream>>>(in, out, bin_start, num_bins, db_min, db_max, flip_x);
-}
 
 
 // ============================================================================

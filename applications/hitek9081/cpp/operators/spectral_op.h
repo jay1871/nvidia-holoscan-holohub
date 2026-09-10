@@ -22,8 +22,7 @@
  *   1. Receives int16 IQ TensorMap from Hitek9081RxOp
  *   2. Feeds it to SpectralPipeline (window -> FFT -> magnitude)
  *   3. Emits display-ready output via the appropriate adapter:
- *      - output_mode=0: Holoviz normalized coords + grid overlays
- *      - output_mode=1: GPU-downsampled raw dB floats for ImGui
+ *      - GPU-downsampled raw dB floats for ImGui
  */
 
 #pragma once
@@ -31,7 +30,6 @@
 #include "holoscan/holoscan.hpp"
 #include "spectral_pipeline.h"
 #include "spectral_kernels.cuh"
-#include "holoviz_output.h"
 #include "ddc_manager.h"
 #include <cuda_runtime.h>
 #include <vector>
@@ -68,9 +66,6 @@ class SpectralOp : public Operator {
   // Shared DDC manager
   std::shared_ptr<DDCManager> ddc_manager_;
 
-  // Display adapters
-  HolovizOutput holoviz_output_;
-
   std::vector<float*> ds_d_;
   int ds_out_bins_ = 0;
 
@@ -92,9 +87,7 @@ class SpectralOp : public Operator {
   Parameter<int> bin_end_;
   Parameter<int> iq_swap_;
   Parameter<int> adc_bits_;
-  Parameter<int> output_mode_;
   Parameter<std::string> amc_model_path_;
-  Parameter<std::vector<float>> freq_tick_positions_;
 };
 
 }  // namespace holoscan::ops

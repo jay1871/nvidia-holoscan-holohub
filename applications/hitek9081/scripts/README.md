@@ -89,8 +89,8 @@ python scripts/train_amc_raw-iq.py \
 | `--epochs`            | `250`                       | Total epoch target                                                      |
 | `--batch-size`        | `128`                       | Batch size (128-256 recommended for GPU)                                |
 | `--lr`                | `1e-3`                      | Initial learning rate (AdamW + ReduceLROnPlateau)                       |
-| `--workers`           | `max cores - 2`             | DataLoader worker processes (e.g., 18 on 20-core host)                   |
-| `--input-length`      | `4096`                      | Number of complex IQ samples per signal (matches DDC output buffer)    |
+| `--workers`           | `max cores - 2`             | DataLoader worker processes (e.g., 18 on 20-core host)                  |
+| `--input-length`      | `4096`                      | Number of complex IQ samples per signal (matches DDC output buffer)     |
 | `--backbone`          | `convnext1d`                | Model architecture: `convnext1d` or `resnet1d`                          |
 | `--samples-per-class` | `2000`                      | Dynamic training samples synthesized per class per epoch                |
 | `--snr-min`           | `-5.0`                      | Minimum SNR in dB                                                       |

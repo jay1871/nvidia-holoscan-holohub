@@ -1,0 +1,4 @@
+*.txt
+*.patch
+.antigravity/
+models/

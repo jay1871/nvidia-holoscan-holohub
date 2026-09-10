@@ -33,11 +33,6 @@ struct AppConfig {
   int iq_swap = 1;
 
   int iq_format = 1;  // 0=pair-interleaved [I,Q,I,Q,...], 1=block-4 [IIII,QQQQ,...]
-#ifdef HAS_IMGUI
-  bool use_imgui = true;
-#else
-  bool use_imgui = false;
-#endif
   bool waterfall = false;
   bool dump_packets = false;
 
@@ -47,8 +42,4 @@ struct AppConfig {
   int samples_per_antenna = 992;
   uint32_t data_port = 4096;
   int batch_size = 20480;
-
-  // Frequency tick positions for Holoviz grid
-  std::vector<float> tick_x_norm;
-  std::vector<double> tick_freqs_mhz;
 };

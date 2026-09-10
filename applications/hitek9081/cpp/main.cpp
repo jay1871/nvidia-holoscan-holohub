@@ -19,12 +19,12 @@
  * hitek9081
  *
  * Receive high-rate IQ data from a Holoscan Sensor Bridge (HSB) FPGA using
- * DAQIRI DPDK, compute windowed FFT magnitude on GPU, and display the
- * spectrum in real-time via Holoviz.
+ * DAQIRI ibverbs, compute windowed FFT magnitude on GPU, and display the
+ * spectrum in real-time via ImGui/ImPlot.
  *
  * Pipeline:
- *   Hitek9081RxOp --> SpectralOp --> ImGuiDisplay / HolovizOp
- *   (DPDK RX,       (window, FFT,    (spectrum & waterfall display)
+ *   Hitek9081RxOp --> SpectralOp --> ImGuiSinkOp
+ *   (ibverbs RX,    (window, FFT,    (spectrum & waterfall display)
  *    raw IQ out)     averaging,
  *                    magnitude)
  *
@@ -102,8 +102,6 @@ void print_usage(const char* prog)
               << "  --freq-min MHz      Display minimum frequency (default: center - sr/2)\n"
               << "  --freq-max MHz      Display maximum frequency (default: center + sr/2)\n"
               << "  --hololink IP       HSB data-plane IP (default: from YAML)\n"
-              << "  --imgui             Use ImGui/ImPlot GUI (default when built with ImGui)\n"
-              << "  --holoviz           Use Holoviz renderer instead of ImGui\n"
               << "  --waterfall         Enable waterfall display in ImGui\n"
               << "  --dump-packets      Dump 10 packets to PCAP and raw binary after 5 seconds\n"
               << "  -h, --help          Show this help\n";
@@ -165,9 +163,6 @@ int main(int argc, char** argv) {
       {"packets-per-frame", required_argument, nullptr, 0},
       {"freq-min", required_argument, nullptr, 0},
       {"freq-max", required_argument, nullptr, 0},
-      {"imgui", no_argument, nullptr, 0},
-      {"no-imgui", no_argument, nullptr, 0},
-      {"holoviz", no_argument, nullptr, 0},
       {"waterfall", no_argument, nullptr, 0},
       {"dump-packets", no_argument, nullptr, 0},
       {0, 0, nullptr, 0}};
@@ -198,13 +193,8 @@ int main(int argc, char** argv) {
         cfg.freq_min_mhz = std::stod(optarg);
       } else if (name == "freq-max") {
         cfg.freq_max_mhz = std::stod(optarg);
-      } else if (name == "imgui") {
-        cfg.use_imgui = true;
-      } else if (name == "no-imgui" || name == "holoviz") {
-        cfg.use_imgui = false;
       } else if (name == "waterfall") {
         cfg.waterfall = true;
-        cfg.use_imgui = true;
       } else if (name == "dump-packets") {
         cfg.dump_packets = true;
       }
@@ -234,38 +224,6 @@ int main(int argc, char** argv) {
   if (cfg.freq_min_mhz == 0 && cfg.freq_max_mhz == 0) {
     cfg.freq_min_mhz = cfg.center_freq_mhz - cfg.sr_mhz / 2.0;
     cfg.freq_max_mhz = cfg.center_freq_mhz + cfg.sr_mhz / 2.0;
-  }
-
-  // Compute display bin range (same formula as compose() for tick alignment).
-  double full_bw = cfg.sr_mhz;
-  double f_low = cfg.center_freq_mhz - full_bw / 2.0;
-  int bin_start = static_cast<int>((cfg.freq_min_mhz - f_low) / full_bw * cfg.fft_size);
-  int bin_end = static_cast<int>((cfg.freq_max_mhz - f_low) / full_bw * cfg.fft_size);
-  if (bin_start < 0) bin_start = 0;
-  if (bin_end > cfg.fft_size) bin_end = cfg.fft_size;
-  int num_bins = bin_end - bin_start;
-
-  // Compute integer-MHz frequency ticks, capped at 11.
-  // Pick the smallest step (1, 2, 5, 10, 20, 50 ...) that yields <= 11 ticks.
-  {
-    constexpr int MAX_TICKS = 11;
-    // candidate steps in MHz
-    const double steps[] = {1, 2, 5, 10, 20, 25, 50, 100, 200, 250, 500, 1000};
-    double step = steps[0];
-    for (double s : steps) {
-      step = s;
-      int count = static_cast<int>(std::floor(cfg.freq_max_mhz / s) -
-                                   std::ceil(cfg.freq_min_mhz / s)) + 1;
-      if (count <= MAX_TICKS) break;
-    }
-    double first = std::ceil(cfg.freq_min_mhz / step) * step;
-    for (double f = first; f <= cfg.freq_max_mhz + 1e-9; f += step) {
-      // Compute tick x-position using the same bin math as the CUDA kernel
-      double bin_frac = (f - f_low) / full_bw * cfg.fft_size - bin_start;
-      float x_norm = static_cast<float>(bin_frac / (num_bins - 1));
-      cfg.tick_freqs_mhz.push_back(f);
-      cfg.tick_x_norm.push_back(x_norm);
-    }
   }
 
   if (optind >= argc) {

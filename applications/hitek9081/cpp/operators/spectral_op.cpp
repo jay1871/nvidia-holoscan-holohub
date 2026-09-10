@@ -48,12 +48,8 @@ void SpectralOp::setup(OperatorSpec& spec) {
   spec.param(bin_end_, "bin_end", "Display end bin", "Last FFT bin to display (0=all)", 0);
   spec.param(iq_swap_, "iq_swap", "IQ swap", "Swap I/Q (0=I first, 1=Q first)", 0);
   spec.param(adc_bits_, "adc_bits", "ADC bits", "ADC resolution in bits", 16);
-  spec.param(output_mode_, "output_mode", "Output mode",
-             "0=normalized coords for Holoviz, 1=raw dB floats for ImGui", 0);
   spec.param(amc_model_path_, "amc_model_path", "AMC model path",
              "Path to ONNX model for modulation classification", std::string(""));
-  spec.param(freq_tick_positions_, "freq_tick_positions", "Frequency tick positions",
-             "Normalized [0,1] x-positions for frequency grid lines", std::vector<float>{});
 }
 
 void SpectralOp::initialize() {
@@ -75,21 +71,11 @@ void SpectralOp::initialize() {
   dsp_cfg.iq_swap = iq_swap_.get();
   pipeline_.initialize(dsp_cfg);
 
-  // Initialize display output
-  if (output_mode_.get() == 0) {
-    HolovizOutput::Config viz_cfg;
-    viz_cfg.bin_start = resolved_bin_start_;
-    viz_cfg.bin_end = resolved_bin_end_;
-    viz_cfg.db_min = db_min_.get();
-    viz_cfg.db_max = db_max_.get();
-    viz_cfg.freq_tick_positions = freq_tick_positions_.get();
-    holoviz_output_.initialize(viz_cfg, A, pipeline_.stream());
-  } else {
-    ds_out_bins_ = (resolved_num_bins_ > MAX_DISPLAY_BINS) ? MAX_DISPLAY_BINS : resolved_num_bins_;
-    ds_d_.resize(A, nullptr);
-    for (int a = 0; a < A; a++) {
-      cudaMalloc(&ds_d_[a], ds_out_bins_ * sizeof(float));
-    }
+  // Initialize ImGui display output buffers
+  ds_out_bins_ = (resolved_num_bins_ > MAX_DISPLAY_BINS) ? MAX_DISPLAY_BINS : resolved_num_bins_;
+  ds_d_.resize(A, nullptr);
+  for (int a = 0; a < A; a++) {
+    cudaMalloc(&ds_d_[a], ds_out_bins_ * sizeof(float));
   }
 
   // Initialize AMC inference via DDCManager if model path provided
@@ -104,10 +90,9 @@ void SpectralOp::initialize() {
   }
 
   HOLOSCAN_LOG_INFO("SpectralOp::initialize() -- fft={} antennas={} averages={} dB=[{},{}] "
-                    "iq_swap={} bins=[{},{}] mode={}",
+                    "iq_swap={} bins=[{},{}] display_bins={}",
                     N, A, num_averages_.get(), db_min_.get(), db_max_.get(),
-                    iq_swap_.get(), resolved_bin_start_, resolved_bin_end_,
-                    output_mode_.get() == 0 ? "holoviz" : "imgui");
+                    iq_swap_.get(), resolved_bin_start_, resolved_bin_end_, ds_out_bins_);
 }
 
 void SpectralOp::compute(InputContext& op_input, OutputContext& op_output, ExecutionContext&) {
@@ -131,8 +116,6 @@ void SpectralOp::compute(InputContext& op_input, OutputContext& op_output, Execu
       }
     }
     pipeline_.process(iq_ptrs, valid);
-    bool has_new = pipeline_.has_new_result();
-    if (has_new) has_result_ = true;
 
     // Process active DDC channels on raw IQ + run AMC classification
     if (ddc_manager_) {
@@ -140,10 +123,8 @@ void SpectralOp::compute(InputContext& op_input, OutputContext& op_output, Execu
     }
   }
 
-  if (output_mode_.get() == 0) {
-    if (has_result_) holoviz_output_.emit(pipeline_, op_output);
-  } else {
-    if (pipeline_.has_new_result()) emit_raw_db(op_output);
+  if (pipeline_.has_new_result()) {
+    emit_raw_db(op_output);
   }
 }
 

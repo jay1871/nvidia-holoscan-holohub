@@ -70,54 +70,50 @@ target_link_libraries(hololink_core PUBLIC CUDA::cuda_driver fmt::fmt-header-onl
 set_property(TARGET hololink_core PROPERTY POSITION_INDEPENDENT_CODE ON)
 
 # ---------------------------------------------------------------------------
-# ImGui/ImPlot (optional, default ON)
+# ImGui/ImPlot display
 # ---------------------------------------------------------------------------
-option(HITEK9081_IMGUI "Build with ImGui/ImPlot display support" ON)
+FetchContent_Declare(imgui
+  GIT_REPOSITORY https://github.com/ocornut/imgui.git
+  GIT_TAG        v1.91.8
+  GIT_SHALLOW    TRUE
+)
+FetchContent_Declare(implot
+  GIT_REPOSITORY https://github.com/epezent/implot.git
+  GIT_TAG        v0.16
+  GIT_SHALLOW    TRUE
+)
+FetchContent_Declare(glfw
+  GIT_REPOSITORY https://github.com/glfw/glfw.git
+  GIT_TAG        3.4
+  GIT_SHALLOW    TRUE
+)
+set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
+set(GLFW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(GLFW_BUILD_INSTALL OFF CACHE BOOL "" FORCE)
+set(GLFW_BUILD_WAYLAND OFF CACHE BOOL "" FORCE)
+set(GLFW_BUILD_X11 ON CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(imgui implot glfw)
 
-if(HITEK9081_IMGUI)
-  FetchContent_Declare(imgui
-    GIT_REPOSITORY https://github.com/ocornut/imgui.git
-    GIT_TAG        v1.91.8
-    GIT_SHALLOW    TRUE
-  )
-  FetchContent_Declare(implot
-    GIT_REPOSITORY https://github.com/epezent/implot.git
-    GIT_TAG        v0.16
-    GIT_SHALLOW    TRUE
-  )
-  FetchContent_Declare(glfw
-    GIT_REPOSITORY https://github.com/glfw/glfw.git
-    GIT_TAG        3.4
-    GIT_SHALLOW    TRUE
-  )
-  set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
-  set(GLFW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-  set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-  set(GLFW_BUILD_INSTALL OFF CACHE BOOL "" FORCE)
-  set(GLFW_BUILD_WAYLAND OFF CACHE BOOL "" FORCE)
-  set(GLFW_BUILD_X11 ON CACHE BOOL "" FORCE)
-  FetchContent_MakeAvailable(imgui implot glfw)
+find_package(OpenGL REQUIRED)
 
-  find_package(OpenGL REQUIRED)
-
-  add_library(imgui_lib STATIC
-    ${imgui_SOURCE_DIR}/imgui.cpp
-    ${imgui_SOURCE_DIR}/imgui_draw.cpp
-    ${imgui_SOURCE_DIR}/imgui_tables.cpp
-    ${imgui_SOURCE_DIR}/imgui_widgets.cpp
-    ${imgui_SOURCE_DIR}/backends/imgui_impl_glfw.cpp
-    ${imgui_SOURCE_DIR}/backends/imgui_impl_opengl3.cpp
-    ${implot_SOURCE_DIR}/implot.cpp
-    ${implot_SOURCE_DIR}/implot_items.cpp
-  )
-  target_include_directories(imgui_lib PUBLIC
-    ${imgui_SOURCE_DIR}
-    ${imgui_SOURCE_DIR}/backends
-    ${implot_SOURCE_DIR}
-  )
-  target_link_libraries(imgui_lib PUBLIC glfw OpenGL::GL)
-  set_property(TARGET imgui_lib PROPERTY POSITION_INDEPENDENT_CODE ON)
-endif()
+add_library(imgui_lib STATIC
+  ${imgui_SOURCE_DIR}/imgui.cpp
+  ${imgui_SOURCE_DIR}/imgui_draw.cpp
+  ${imgui_SOURCE_DIR}/imgui_tables.cpp
+  ${imgui_SOURCE_DIR}/imgui_widgets.cpp
+  ${imgui_SOURCE_DIR}/backends/imgui_impl_glfw.cpp
+  ${imgui_SOURCE_DIR}/backends/imgui_impl_opengl3.cpp
+  ${implot_SOURCE_DIR}/implot.cpp
+  ${implot_SOURCE_DIR}/implot_items.cpp
+)
+target_include_directories(imgui_lib PUBLIC
+  ${imgui_SOURCE_DIR}
+  ${imgui_SOURCE_DIR}/backends
+  ${implot_SOURCE_DIR}
+)
+target_link_libraries(imgui_lib PUBLIC glfw OpenGL::GL)
+set_property(TARGET imgui_lib PROPERTY POSITION_INDEPENDENT_CODE ON)
 
 # ---------------------------------------------------------------------------
 # Application
@@ -128,10 +124,10 @@ add_executable(hitek9081
   hardware/hsb_device_manager.cpp
   operators/hitek9081_rx_op.cpp
   operators/spectral_op.cpp
+  operators/imgui_sink_op.cpp
+  ui/imgui_display.cpp
   app.cpp
   main.cpp
-  $<$<BOOL:${HITEK9081_IMGUI}>:ui/imgui_display.cpp>
-  $<$<BOOL:${HITEK9081_IMGUI}>:operators/imgui_sink_op.cpp>
 )
 set_target_properties(hitek9081 PROPERTIES CUDA_ARCHITECTURES "90;120;121")
 find_library(NVINFER_LIB nvinfer PATHS /usr/lib/aarch64-linux-gnu /usr/lib/x86_64-linux-gnu)
@@ -149,21 +145,18 @@ target_include_directories(hitek9081
 target_link_libraries(hitek9081
   PRIVATE
     holoscan::core
-    holoscan::ops::holoviz
     hololink_core
     CUDA::cuda_driver
     CUDA::cufft
-    $<$<BOOL:${HITEK9081_IMGUI}>:imgui_lib>
+    imgui_lib
     ${NVINFER_LIB}
     ${NVONNXPARSER_LIB}
 )
-if(HITEK9081_IMGUI)
-  target_compile_definitions(hitek9081 PRIVATE HAS_IMGUI=1)
-endif()
+target_compile_definitions(hitek9081 PRIVATE HAS_IMGUI=1)
 holohub_link_daqiri(hitek9081)
 
-# Configure DAQIRI DPDK manager
-target_compile_definitions(hitek9081 PUBLIC DAQIRI_MGR_DPDK=1)
+# Configure DAQIRI ibverbs engine
+target_compile_definitions(hitek9081 PUBLIC DAQIRI_ENGINE_IBVERBS=1)
 
 # Copy config file to build directory
 add_custom_target(hitek9081_config

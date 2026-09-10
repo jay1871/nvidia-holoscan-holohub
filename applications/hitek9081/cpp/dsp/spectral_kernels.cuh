@@ -24,19 +24,7 @@
 void generate_hanning_window(float* out, int n, cudaStream_t stream);
 
 
-// Normalize dB values to [0,1] range and pack as (x,y) coordinate pairs for Holoviz.
-// Only bins in [bin_start, bin_end) are mapped to x=[0,1].
-// in:        float array of length n (magnitude in dB)
-// out:       float array of length n*2 (interleaved x,y pairs)
-// db_min:    minimum dB value mapped to y=1 (bottom)
-// db_max:    maximum dB value mapped to y=0 (top)
-// bin_start: first bin to display (inclusive)
-// bin_end:   last bin to display (exclusive)
-// flip_x:   if nonzero, reverse x direction (for spectrum mirroring with iq_swap)
-void normalize_to_coords(const float* in, float* out, int n,
-                         float db_min, float db_max,
-                         int bin_start, int bin_end,
-                         int flip_x, cudaStream_t stream);
+
 
 // Finalize averaged power to dB: out[i] = 10*log10(accum[i] / num_averages).
 // Floors at -200 dB to avoid log(0).
