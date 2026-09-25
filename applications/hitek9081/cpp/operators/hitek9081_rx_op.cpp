@@ -102,6 +102,7 @@ void Hitek9081RxOp::setup(OperatorSpec& spec) {
 
 void Hitek9081RxOp::initialize() {
   Operator::initialize();
+  freeResources();
 
   port_id_ = get_port_id(interface_name_.get());
   if (port_id_ < 0) {
@@ -194,7 +195,6 @@ void Hitek9081RxOp::compute(InputContext&, OutputContext& op_output, ExecutionCo
   BurstParams* burst;
   const auto num_rx_queues = get_num_rx_queues(port_id_);
 
-  pending_emit_ = false;
   for (int drain = 0; drain < 8; drain++) {
     bool any_burst = false;
     for (int q = 0; q < num_rx_queues; q++) {
@@ -288,14 +288,10 @@ void Hitek9081RxOp::compute(InputContext&, OutputContext& op_output, ExecutionCo
 
       if (aggr_pkts_recv_ >= batch_sz) {
         aggr_pkts_recv_ = 0;
-        process_batch();
+        process_batch(op_output);
       }
     }
     if (!any_burst) break;
-  }
-
-  if (pending_emit_) {
-    emit_iq(pending_emit_buf_, op_output);
   }
 
   auto now = std::chrono::steady_clock::now();
@@ -372,7 +368,7 @@ void Hitek9081RxOp::drain_batch_queue() {
   batch_ant_pkt_count_.fill(0);
 }
 
-void Hitek9081RxOp::process_batch() {
+void Hitek9081RxOp::process_batch(OutputContext& op_output) {
   free_processed_packets();
   if (batch_q_.size() == static_cast<size_t>(num_concurrent)) {
     HOLOSCAN_LOG_ERROR("Fell behind -- dropping batch!");
@@ -387,7 +383,7 @@ void Hitek9081RxOp::process_batch() {
 
   int idx = cur_batch_idx_;
 
-  accumulate_batch(idx);
+  accumulate_batch(idx, op_output);
 
   cudaEventRecord(rx_events_[idx], accum_stream_);
   cur_batch_.evt = rx_events_[idx];
@@ -398,50 +394,57 @@ void Hitek9081RxOp::process_batch() {
   cur_batch_idx_ = (cur_batch_idx_ + 1) % num_concurrent;
 }
 
-void Hitek9081RxOp::accumulate_batch(int batch_idx) {
+void Hitek9081RxOp::accumulate_batch(int batch_idx, OutputContext& op_output) {
   const int A = cached_num_antennas_;
   const int S = cached_samples_per_ant_;
   const int N = cached_fft_size_;
   const int iq_fmt = cached_iq_format_;
-  const int pkts_needed = (N + S - 1) / S;
 
-  bool all_have_enough = true;
-  for (int a = 0; a < A; a++) {
-    if (batch_ant_pkt_count_[a] < pkts_needed) {
-      all_have_enough = false;
-      break;
-    }
-  }
+  int pkt_offset[MAX_ANTENNAS] = {};
 
-  if (all_have_enough) {
+  while (true) {
+    bool has_more = false;
     for (int a = 0; a < A; a++) {
-      gather_iq_from_scattered(h_ant_ptrs_[batch_idx][a],
-                               static_cast<int16_t*>(accum_bufs_[active_buf_][a]),
-                               pkts_needed, S,
-                               0, N, iq_fmt, accum_stream_);
-      accum_offset_[a] = 0;
+      if (pkt_offset[a] < batch_ant_pkt_count_[a]) {
+        has_more = true;
+        break;
+      }
     }
-    pending_emit_ = true;
-    pending_emit_buf_ = active_buf_;
-    active_buf_ = (active_buf_ + 1) % NUM_ACCUM_BUFS;
-  } else {
+    if (!has_more) break;
+
+    int needed_samples = N - accum_offset_[0];
+    if (needed_samples <= 0) {
+      emit_iq(active_buf_, op_output);
+      active_buf_ = (active_buf_ + 1) % NUM_ACCUM_BUFS;
+      for (int a = 0; a < A; a++) {
+        accum_offset_[a] = 0;
+      }
+      needed_samples = N;
+    }
+
+    bool progress = false;
     for (int a = 0; a < A; a++) {
-      int remaining = batch_ant_pkt_count_[a];
-      if (remaining <= 0) continue;
+      int a_needed = N - accum_offset_[a];
+      if (a_needed <= 0) continue;
 
-      int needed = N - accum_offset_[a];
-      if (needed <= 0) continue;
+      int pkts_needed = (a_needed + S - 1) / S;
+      int pkts_avail = batch_ant_pkt_count_[a] - pkt_offset[a];
+      if (pkts_avail <= 0) continue;
 
-      int pkts_to_copy = std::min((needed + S - 1) / S, remaining);
-      int samples_to_copy = std::min(pkts_to_copy * S, needed);
+      int pkts_to_copy = std::min(pkts_needed, pkts_avail);
+      int samples_to_copy = std::min(pkts_to_copy * S, a_needed);
 
-      gather_iq_from_scattered(h_ant_ptrs_[batch_idx][a],
+      gather_iq_from_scattered(&h_ant_ptrs_[batch_idx][a][pkt_offset[a]],
                                static_cast<int16_t*>(accum_bufs_[active_buf_][a]),
                                pkts_to_copy, S,
                                accum_offset_[a], N, iq_fmt, accum_stream_);
 
       accum_offset_[a] += samples_to_copy;
+      pkt_offset[a] += pkts_to_copy;
+      progress = true;
     }
+
+    if (!progress) break;
 
     bool all_full = true;
     for (int a = 0; a < A; a++) {
@@ -452,15 +455,11 @@ void Hitek9081RxOp::accumulate_batch(int batch_idx) {
     }
 
     if (all_full) {
-      pending_emit_ = true;
-      pending_emit_buf_ = active_buf_;
-      int next_buf = (active_buf_ + 1) % NUM_ACCUM_BUFS;
+      emit_iq(active_buf_, op_output);
+      active_buf_ = (active_buf_ + 1) % NUM_ACCUM_BUFS;
       for (int a = 0; a < A; a++) {
         accum_offset_[a] = 0;
-        cudaMemsetAsync(accum_bufs_[next_buf][a], 0,
-                        N * 2 * sizeof(int16_t), accum_stream_);
       }
-      active_buf_ = next_buf;
     }
   }
 }
@@ -595,18 +594,36 @@ void Hitek9081RxOp::dump_raw_samples(const uint8_t* pkt_ptr, int pkt_len, int an
 void Hitek9081RxOp::freeResources() {
   for (int n = 0; n < num_concurrent; n++) {
     for (int a = 0; a < MAX_ANTENNAS; a++) {
-      if (h_ant_ptrs_[n][a]) cudaFreeHost(h_ant_ptrs_[n][a]);
+      if (h_ant_ptrs_[n][a]) {
+        cudaFreeHost(h_ant_ptrs_[n][a]);
+        h_ant_ptrs_[n][a] = nullptr;
+      }
     }
-    if (rx_events_[n]) cudaEventDestroy(rx_events_[n]);
+    if (rx_events_[n]) {
+      cudaEventDestroy(rx_events_[n]);
+      rx_events_[n] = nullptr;
+    }
   }
   for (int b = 0; b < NUM_ACCUM_BUFS; b++) {
-    for (auto p : accum_bufs_[b]) { if (p) cudaFree(p); }
+    for (auto p : accum_bufs_[b]) {
+      if (p) cudaFree(p);
+    }
+    accum_bufs_[b].clear();
   }
   for (int b = 0; b < NUM_OUTPUT_BUFS; b++) {
-    for (auto p : output_bufs_[b]) { if (p) cudaFree(p); }
+    for (auto p : output_bufs_[b]) {
+      if (p) cudaFree(p);
+    }
+    output_bufs_[b].clear();
   }
-  if (emit_event_) cudaEventDestroy(emit_event_);
-  if (accum_stream_) cudaStreamDestroy(accum_stream_);
+  if (emit_event_) {
+    cudaEventDestroy(emit_event_);
+    emit_event_ = nullptr;
+  }
+  if (accum_stream_) {
+    cudaStreamDestroy(accum_stream_);
+    accum_stream_ = nullptr;
+  }
 }
 
 }  // namespace holoscan::ops

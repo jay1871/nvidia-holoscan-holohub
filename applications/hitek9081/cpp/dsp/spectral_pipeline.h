@@ -1,3 +1,20 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2025-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 // Windowed FFT -> magnitude pipeline. No display dependencies.
 // Operates entirely on GPU via a dedicated CUDA stream.
 //
@@ -24,12 +41,20 @@ class SpectralPipeline {
     int num_averages = 1;
     int adc_bits = 16;
     int iq_swap = 0;  // 0=I,Q as-is  1=swap (reversed JESD lanes)  2=conjugate (upper sideband)
+    bool dc_block = true;
   };
 
   SpectralPipeline() = default;
   ~SpectralPipeline() { free(); }
 
+  SpectralPipeline(const SpectralPipeline&) = delete;
+  SpectralPipeline& operator=(const SpectralPipeline&) = delete;
+  SpectralPipeline(SpectralPipeline&&) = delete;
+  SpectralPipeline& operator=(SpectralPipeline&&) = delete;
+
   void initialize(const Config& cfg) {
+    free();
+
     cfg_ = cfg;
     N_ = cfg.fft_size;   // FFT length in complex samples
     A_ = cfg.num_antennas;
@@ -40,6 +65,7 @@ class SpectralPipeline {
     cudaMalloc(&window_d_, N_ * sizeof(float));
     generate_hanning_window(window_d_, N_, stream_);
 
+    cudaMalloc(&mean_iq_d_, A_ * 2 * sizeof(float));
     cudaMalloc(&fft_in_d_, A_ * N_ * sizeof(float2));
     // Natural FFT order: bin 0 = DC. Used by DDC for subband extraction.
     cudaMalloc(&fft_out_d_, A_ * N_ * sizeof(float2));
@@ -69,10 +95,21 @@ class SpectralPipeline {
   void process(const int16_t* const* iq_ptrs, int num_valid) {
     const int num_avg = cfg_.num_averages;
 
+    if (cfg_.dc_block) {
+      cudaMemsetAsync(mean_iq_d_, 0, A_ * 2 * sizeof(float), stream_);
+    }
+
     for (int a = 0; a < num_valid && a < A_; a++) {
       if (!iq_ptrs[a]) continue;
-      apply_window_int16_to_float2(iq_ptrs[a], window_d_, fft_in_d_ + a * N_,
-                                   N_, cfg_.iq_swap, stream_);
+      if (cfg_.dc_block) {
+        float* mean_a = mean_iq_d_ + a * 2;
+        dc_mean_int16(iq_ptrs[a], mean_a, N_, cfg_.iq_swap, stream_);
+        apply_window_dcblock_int16_to_float2(iq_ptrs[a], window_d_, mean_a,
+                                             fft_in_d_ + a * N_, N_, cfg_.iq_swap, stream_);
+      } else {
+        apply_window_int16_to_float2(iq_ptrs[a], window_d_, fft_in_d_ + a * N_,
+                                     N_, cfg_.iq_swap, stream_);
+      }
     }
 
     cufftXtExec(fft_plan_, fft_in_d_, fft_out_d_, CUFFT_FORWARD);
@@ -115,13 +152,40 @@ class SpectralPipeline {
 
  private:
   void free() {
-    if (fft_plan_) cufftDestroy(fft_plan_);
-    if (window_d_) cudaFree(window_d_);
-    if (fft_in_d_) cudaFree(fft_in_d_);
-    if (fft_out_d_) cudaFree(fft_out_d_);
-    for (auto p : power_accum_d_) { if (p) cudaFree(p); }
-    for (auto p : mag_d_) { if (p) cudaFree(p); }
-    if (stream_) cudaStreamDestroy(stream_);
+    if (fft_plan_) {
+      cufftDestroy(fft_plan_);
+      fft_plan_ = 0;
+    }
+    if (window_d_) {
+      cudaFree(window_d_);
+      window_d_ = nullptr;
+    }
+    if (mean_iq_d_) {
+      cudaFree(mean_iq_d_);
+      mean_iq_d_ = nullptr;
+    }
+    if (fft_in_d_) {
+      cudaFree(fft_in_d_);
+      fft_in_d_ = nullptr;
+    }
+    if (fft_out_d_) {
+      cudaFree(fft_out_d_);
+      fft_out_d_ = nullptr;
+    }
+    for (auto p : power_accum_d_) {
+      if (p) cudaFree(p);
+    }
+    power_accum_d_.clear();
+    for (auto p : mag_d_) {
+      if (p) cudaFree(p);
+    }
+    mag_d_.clear();
+    if (stream_) {
+      cudaStreamDestroy(stream_);
+      stream_ = nullptr;
+    }
+    avg_count_ = 0;
+    new_result_ = false;
   }
 
   Config cfg_;
@@ -132,6 +196,7 @@ class SpectralPipeline {
   cudaStream_t stream_ = nullptr;
   cufftHandle fft_plan_ = 0;
   float* window_d_ = nullptr;
+  float* mean_iq_d_ = nullptr;          // DC mean per antenna (2 floats per ant: I, Q)
   float2* fft_in_d_ = nullptr;
   float2* fft_out_d_ = nullptr;         // natural order (bin 0 = DC)
   std::vector<float*> power_accum_d_;   // linear |X|^2 accumulator per antenna

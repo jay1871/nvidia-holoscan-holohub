@@ -112,6 +112,14 @@ bool is_power_of_2(int n) { return n > 0 && (n & (n - 1)) == 0; }
 static App* g_active_app = nullptr;
 static HsbDeviceManager* g_hsb = nullptr;
 static std::atomic<bool> g_shutting_down{false};
+static std::atomic<bool> g_daqiri_shutdown_done{false};
+
+static void safe_daqiri_shutdown() {
+  if (!g_daqiri_shutdown_done.exchange(true)) {
+    daqiri::shutdown();
+    HOLOSCAN_LOG_INFO("DAQIRI shut down.");
+  }
+}
 
 void request_app_shutdown() {
   if (g_shutting_down.exchange(true)) return;
@@ -133,7 +141,7 @@ void request_app_shutdown() {
   std::thread watchdog([]() {
     std::this_thread::sleep_for(std::chrono::milliseconds(1000));
     HOLOSCAN_LOG_INFO("Shutdown watchdog: completing exit.");
-    daqiri::shutdown();
+    safe_daqiri_shutdown();
     std::exit(0);
   });
   watchdog.detach();
@@ -263,7 +271,7 @@ int main(int argc, char** argv) {
   // -------------------------------------------------------------------------
   if (!hsb.start_streaming()) {
     HOLOSCAN_LOG_ERROR("Failed to start FPGA streaming");
-    daqiri::shutdown();
+    safe_daqiri_shutdown();
     return 1;
   }
 
@@ -286,8 +294,7 @@ int main(int argc, char** argv) {
   request_app_shutdown();
 
   daqiri::print_stats();
-  daqiri::shutdown();
-  HOLOSCAN_LOG_INFO("DAQIRI shut down.");
+  safe_daqiri_shutdown();
 
   return 0;
 }

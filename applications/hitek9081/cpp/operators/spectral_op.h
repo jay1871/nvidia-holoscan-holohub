@@ -87,6 +87,7 @@ class SpectralOp : public Operator {
   Parameter<int> bin_end_;
   Parameter<int> iq_swap_;
   Parameter<int> adc_bits_;
+  Parameter<bool> dc_block_;
   Parameter<std::string> amc_model_path_;
 };
 

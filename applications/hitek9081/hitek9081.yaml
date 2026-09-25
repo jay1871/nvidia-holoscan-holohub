@@ -107,7 +107,7 @@ daqiri:
         #     - "HSB_RX_CPU"
         flows:
         - name: "hsb_flow_0"
-          id: 0
+          id: 1
           action:
             type: queue
             id: 0
@@ -149,6 +149,7 @@ hitek9081_rx:
 # fft_size, num_antennas, num_averages are set via CLI args
 #
 spectral:
+  dc_block: true                # Time-domain DC mean offset removal (eliminates center LO spike)
   iq_swap: 0                    # 0=I,Q as-is  1=swap Q,I  2=I,Q conjugate (negate Q)
   adc_bits: 16                  # ADC resolution
   amc_model_path: "/workspace/holohub/applications/hitek9081/models/amc_raw_iq_convnext_cfo.onnx"  # Path to ONNX model (empty = classification disabled)

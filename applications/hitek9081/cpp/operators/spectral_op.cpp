@@ -48,12 +48,14 @@ void SpectralOp::setup(OperatorSpec& spec) {
   spec.param(bin_end_, "bin_end", "Display end bin", "Last FFT bin to display (0=all)", 0);
   spec.param(iq_swap_, "iq_swap", "IQ swap", "Swap I/Q (0=I first, 1=Q first)", 0);
   spec.param(adc_bits_, "adc_bits", "ADC bits", "ADC resolution in bits", 16);
+  spec.param(dc_block_, "dc_block", "DC block", "Enable time-domain DC offset removal", true);
   spec.param(amc_model_path_, "amc_model_path", "AMC model path",
              "Path to ONNX model for modulation classification", std::string(""));
 }
 
 void SpectralOp::initialize() {
   Operator::initialize();
+  freeResources();
 
   const int N = fft_size_.get();
   const int A = num_antennas_.get();
@@ -69,6 +71,7 @@ void SpectralOp::initialize() {
   dsp_cfg.num_averages = num_averages_.get();
   dsp_cfg.adc_bits = adc_bits_.get();
   dsp_cfg.iq_swap = iq_swap_.get();
+  dsp_cfg.dc_block = dc_block_.get();
   pipeline_.initialize(dsp_cfg);
 
   // Initialize ImGui display output buffers
@@ -90,9 +93,10 @@ void SpectralOp::initialize() {
   }
 
   HOLOSCAN_LOG_INFO("SpectralOp::initialize() -- fft={} antennas={} averages={} dB=[{},{}] "
-                    "iq_swap={} bins=[{},{}] display_bins={}",
+                    "iq_swap={} bins=[{},{}] display_bins={} dc_block={}",
                     N, A, num_averages_.get(), db_min_.get(), db_max_.get(),
-                    iq_swap_.get(), resolved_bin_start_, resolved_bin_end_, ds_out_bins_);
+                    iq_swap_.get(), resolved_bin_start_, resolved_bin_end_, ds_out_bins_,
+                    dc_block_.get());
 }
 
 void SpectralOp::compute(InputContext& op_input, OutputContext& op_output, ExecutionContext&) {
@@ -135,6 +139,7 @@ void SpectralOp::emit_raw_db(OutputContext& op_output) {
     downsample_peak(pipeline_.mag_gpu(a), ds_d_[a], resolved_num_bins_, ds_out_bins_,
                     resolved_bin_start_, pipeline_.stream());
   }
+  cudaStreamSynchronize(pipeline_.stream());
 
   holoscan::TensorMap out_msg;
   for (int a = 0; a < A; a++) {

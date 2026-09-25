@@ -76,8 +76,8 @@ class Hitek9081RxOp : public Operator {
 
   void free_processed_packets();
   void drain_batch_queue();
-  void process_batch();
-  void accumulate_batch(int batch_idx);
+  void process_batch(OutputContext& op_output);
+  void accumulate_batch(int batch_idx, OutputContext& op_output);
   void emit_iq(int src_buf, OutputContext& op_output);
   void dump_raw_samples(const uint8_t* pkt_ptr, int pkt_len, int ant);
   void freeResources();
@@ -132,8 +132,6 @@ class Hitek9081RxOp : public Operator {
   std::vector<void*> accum_bufs_[NUM_ACCUM_BUFS];
   int active_buf_ = 0;
   int accum_offset_[MAX_ANTENNAS] = {};
-  bool pending_emit_ = false;
-  int pending_emit_buf_ = 0;
 
   // Output snapshot buffers
   std::vector<void*> output_bufs_[NUM_OUTPUT_BUFS];
